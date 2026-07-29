@@ -1,0 +1,37 @@
+import { describe, expect, it } from 'vitest';
+import { estimateTokens, getExposedModels, getModelDisplayName, sortCatalogModels } from '../src/models';
+import { channel, model } from './fixtures';
+
+describe('模型显示与排序', () => {
+  it('使用自定义别名或渠道名加模型名作为默认值', () => {
+    expect(getModelDisplayName(model(), channel())).toBe('测试渠道： Model 1');
+    expect(getModelDisplayName(model({ customAlias: '快速模型' }), channel())).toBe('快速模型');
+  });
+
+  it('启停状态不改变模型的目录顺序', () => {
+    const sorted = sortCatalogModels([
+      model({ id: 'disabled-first', enabled: false, catalogOrder: 0 }),
+      model({ id: 'enabled-second', enabled: true, catalogOrder: 1 }),
+      model({ id: 'enabled-third', enabled: true, catalogOrder: 2 }),
+    ]);
+    expect(sorted.map((item) => item.id)).toEqual(['disabled-first', 'enabled-second', 'enabled-third']);
+  });
+
+  it('只暴露渠道与模型均启用且可用的 OpenAI 模型', () => {
+    const exposed = getExposedModels([channel()], [
+      model(),
+      model({ id: 'disabled', enabled: false }),
+      model({ id: 'missing', available: false }),
+      model({ id: 'anthropic', protocol: 'anthropic' }),
+    ]);
+    expect(exposed.map((item) => item.id)).toEqual(['model-1']);
+  });
+});
+
+describe('estimateTokens', () => {
+  it('分别估算 ASCII 和非 ASCII 文本', () => {
+    expect(estimateTokens('abcdefgh')).toBe(2);
+    expect(estimateTokens('你好世界')).toBe(4);
+    expect(estimateTokens('abc你')).toBe(2);
+  });
+});

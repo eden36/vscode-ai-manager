@@ -1,0 +1,7 @@
+node_modules/
+dist/
+media/main.js
+media/main.js.map
+coverage/
+*.vsix
+*.log

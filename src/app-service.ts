@@ -1,0 +1,160 @@
+import { randomUUID } from 'node:crypto';
+import * as vscode from 'vscode';
+import { joinEndpoint, CatalogService } from './catalog';
+import type { ChatBindingService } from './chat-settings';
+import { createChannelDefaults } from './presets';
+import { StorageService } from './storage';
+import type { CatalogChange, CatalogModel, CatalogRefreshSummary, ChannelConfig, ChannelPreset, DashboardState, ModelProtocol } from './types';
+
+interface SaveChannelInput extends Partial<ChannelConfig> {
+  apiKey?: string;
+  clearApiKey?: boolean;
+}
+
+interface SaveModelInput {
+  channelId: string;
+  id: string;
+  customAlias?: string;
+  enabled?: boolean;
+  protocol?: ModelProtocol;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  toolCalling?: boolean;
+}
+
+export class AppService implements vscode.Disposable {
+  private readonly changeEmitter = new vscode.EventEmitter<void>();
+  readonly onDidChange = this.changeEmitter.event;
+
+  constructor(
+    readonly storage: StorageService,
+    readonly catalog: CatalogService,
+    readonly chatBindings: ChatBindingService,
+  ) {}
+
+  dispose(): void {
+    this.changeEmitter.dispose();
+  }
+
+  async getDashboardState(): Promise<DashboardState> {
+    return {
+      channels: await Promise.all(this.storage.getChannels().map(async (channel) => ({ ...channel, hasCredential: await this.storage.hasApiKey(channel.id) }))),
+      models: this.storage.getModels(),
+      chatBindings: this.chatBindings.getSelections(),
+    };
+  }
+
+  async saveChannel(input: SaveChannelInput): Promise<ChannelConfig> {
+    if (input.clearApiKey && input.apiKey?.trim()) throw new Error('不能同时填写并清除 API Key');
+    let channel: ChannelConfig | undefined;
+    await this.storage.updateChannels((channels) => {
+      const existing = input.id ? channels.find((item) => item.id === input.id) : undefined;
+      if (input.id && !existing) throw new Error('渠道不存在');
+      const preset = this.parsePreset(input.preset);
+      const defaults = createChannelDefaults(preset);
+      channel = {
+        ...defaults,
+        ...existing,
+        id: existing?.id ?? randomUUID(),
+        name: this.requiredText(input.name ?? existing?.name, '渠道名称'),
+        preset,
+        baseUrl: this.requiredText(input.baseUrl ?? existing?.baseUrl ?? defaults.baseUrl, 'Base URL').replace(/\/+$/, ''),
+        modelsPath: this.normalizedPath(input.modelsPath ?? existing?.modelsPath ?? defaults.modelsPath),
+        chatPath: this.normalizedPath(input.chatPath ?? existing?.chatPath ?? defaults.chatPath),
+        enabled: input.enabled ?? existing?.enabled ?? true,
+        timeoutMs: this.boundedInteger(input.timeoutMs ?? existing?.timeoutMs ?? defaults.timeoutMs, 1_000, 120_000, '超时时间'),
+        refreshIntervalMinutes: this.boundedInteger(input.refreshIntervalMinutes ?? existing?.refreshIntervalMinutes ?? defaults.refreshIntervalMinutes, 5, 10_080, '刷新周期'),
+        defaultMaxInputTokens: this.boundedInteger(input.defaultMaxInputTokens ?? existing?.defaultMaxInputTokens ?? defaults.defaultMaxInputTokens, 1_024, 10_000_000, '默认输入上限'),
+        defaultMaxOutputTokens: this.boundedInteger(input.defaultMaxOutputTokens ?? existing?.defaultMaxOutputTokens ?? defaults.defaultMaxOutputTokens, 256, 1_000_000, '默认输出上限'),
+      };
+      joinEndpoint(channel.baseUrl, channel.modelsPath);
+      joinEndpoint(channel.baseUrl, channel.chatPath);
+      return existing ? channels.map((item) => item.id === channel!.id ? channel! : item) : [...channels, channel];
+    });
+    if (!channel) throw new Error('渠道保存失败');
+    if (input.clearApiKey) await this.storage.deleteApiKey(channel.id);
+    else if (typeof input.apiKey === 'string' && input.apiKey.trim()) await this.storage.saveApiKey(channel.id, input.apiKey);
+    await this.chatBindings.reconcile();
+    this.changeEmitter.fire();
+    return channel;
+  }
+
+  async toggleChannel(channelId: string): Promise<void> {
+    await this.storage.updateChannels((channels) => {
+      if (!channels.some((item) => item.id === channelId)) throw new Error('渠道不存在');
+      return channels.map((item) => item.id === channelId ? { ...item, enabled: !item.enabled } : item);
+    });
+    await this.chatBindings.reconcile();
+    this.changeEmitter.fire();
+  }
+
+  async deleteChannel(channelId: string): Promise<void> {
+    await this.storage.updateChannels((channels) => channels.filter((channel) => channel.id !== channelId));
+    await this.storage.updateModels((models) => models.filter((model) => model.channelId !== channelId));
+    await this.storage.deleteApiKey(channelId);
+    await this.chatBindings.reconcile();
+    this.changeEmitter.fire();
+  }
+
+  async refreshChannel(channelId: string): Promise<CatalogChange> {
+    const result = await this.catalog.refreshChannel(channelId);
+    await this.chatBindings.reconcile();
+    this.changeEmitter.fire();
+    return result.change;
+  }
+
+  async refreshAll(dueOnly = false): Promise<CatalogRefreshSummary> {
+    const summary = await this.catalog.refreshAll(dueOnly);
+    await this.chatBindings.reconcile();
+    this.changeEmitter.fire();
+    return summary;
+  }
+
+  async saveModel(input: SaveModelInput): Promise<void> {
+    await this.storage.updateModels((models) => {
+      const model = models.find((item) => item.channelId === input.channelId && item.id === input.id);
+      if (!model) throw new Error('模型不存在');
+      const channel = this.storage.getChannels().find((item) => item.id === model.channelId);
+      const protocol = input.protocol ?? model.protocol;
+      let enabled = input.enabled ?? model.enabled;
+      if (enabled && (!channel?.enabled || !model.available || protocol !== 'openai')) throw new Error('当前模型不可启用');
+      if (protocol !== 'openai') enabled = false;
+      const customAlias = input.customAlias === undefined ? model.customAlias : input.customAlias.trim() || undefined;
+      if (customAlias && customAlias.length > 80) throw new Error('模型别名不能超过 80 个字符');
+      const metadataChanged = input.protocol !== undefined || input.maxInputTokens !== undefined || input.maxOutputTokens !== undefined || input.toolCalling !== undefined;
+      const updated: CatalogModel = {
+        ...model,
+        customAlias,
+        enabled,
+        protocol,
+        maxInputTokens: input.maxInputTokens === undefined ? model.maxInputTokens : this.boundedInteger(input.maxInputTokens, 1_024, 10_000_000, '输入上限'),
+        maxOutputTokens: input.maxOutputTokens === undefined ? model.maxOutputTokens : this.boundedInteger(input.maxOutputTokens, 256, 1_000_000, '输出上限'),
+        toolCalling: input.toolCalling ?? model.toolCalling,
+        metadataOverridden: metadataChanged ? true : model.metadataOverridden,
+      };
+      return models.map((item) => item.channelId === updated.channelId && item.id === updated.id ? updated : item);
+    });
+    await this.chatBindings.reconcile();
+    this.changeEmitter.fire();
+  }
+
+  private parsePreset(value: unknown): ChannelPreset {
+    return value === 'opencode-go' || value === 'opencode-console' ? value : 'custom';
+  }
+
+  private requiredText(value: unknown, label: string): string {
+    if (typeof value !== 'string' || !value.trim()) throw new Error(`${label}不能为空`);
+    return value.trim();
+  }
+
+  private normalizedPath(value: unknown): string {
+    const path = this.requiredText(value, '接口路径');
+    return `/${path.replace(/^\/+/, '')}`;
+  }
+
+  private boundedInteger(value: unknown, min: number, max: number, label: string): number {
+    const number = typeof value === 'number' ? value : Number(value);
+    if (!Number.isInteger(number) || number < min || number > max) throw new Error(`${label}必须是 ${min} 到 ${max} 之间的整数`);
+    return number;
+  }
+}

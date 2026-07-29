@@ -1,0 +1,35 @@
+{
+    "telemetry.machineId": "963687dd8b76e940b4ee3098ef091d820b1b31c27d6444ce757179d205f9b345",
+    "telemetry.sqmId": "{08799DB1-9208-4ADE-8807-4CEEEC791125}",
+    "telemetry.devDeviceId": "b194cf5d-f4b2-452a-afad-c3c26f842b38",
+    "backupWorkspaces": {
+        "workspaces": [],
+        "folders": [],
+        "emptyWindows": []
+    },
+    "windowControlHeight": 35,
+    "theme": "vs-dark",
+    "themeBackground": "#121314",
+    "windowSplash": {
+        "zoomLevel": 0,
+        "baseTheme": "vs-dark",
+        "colorInfo": {
+            "foreground": "#bfbfbf",
+            "background": "#121314",
+            "editorBackground": "#121314",
+            "titleBarBackground": "#191a1b",
+            "titleBarBorder": "#2a2b2c",
+            "activityBarBackground": "#191a1b",
+            "activityBarBorder": "#2a2b2c",
+            "sideBarBackground": "#191a1b",
+            "sideBarBorder": "#2a2b2c",
+            "panelBackground": "#191a1b",
+            "editorGroupBorder": "rgba(255, 255, 255, 0.09)",
+            "agentsPanelBackground": "#191a1b",
+            "agentsPanelBorder": "#2a2b2c",
+            "statusBarBackground": "#191a1b",
+            "statusBarBorder": "#2a2b2c",
+            "statusBarNoFolderBackground": "#191a1b"
+        }
+    }
+}

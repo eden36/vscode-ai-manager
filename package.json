@@ -1,0 +1,104 @@
+{
+  "name": "ai-manager",
+  "displayName": "AI Manager",
+  "description": "统一管理 OpenAI-compatible 渠道、模型目录和 VS Code Chat 模型绑定。",
+  "version": "0.3.0",
+  "publisher": "ai-manager",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.121.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "AI",
+    "Chat",
+    "OpenAI",
+    "Model Router"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onView:aiManager.dashboard",
+    "onLanguageModelChatProvider:ai-manager"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "aiManager",
+          "title": "AI Manager",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "aiManager": [
+        {
+          "id": "aiManager.dashboard",
+          "name": "模型管理",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "aiManager.open",
+        "title": "AI Manager: 打开模型管理"
+      },
+      {
+        "command": "aiManager.refreshAll",
+        "title": "AI Manager: 刷新全部模型目录",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "aiManager.applyChatSettings",
+        "title": "AI Manager: 应用 Chat 模型设置"
+      },
+      {
+        "command": "aiManager.showLogs",
+        "title": "AI Manager: 显示日志"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "aiManager.refreshAll",
+          "when": "view == aiManager.dashboard",
+          "group": "navigation"
+        }
+      ]
+    },
+    "languageModelChatProviders": [
+      {
+        "vendor": "ai-manager",
+        "displayName": "AI Manager",
+        "managementCommand": "aiManager.open"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:integration": "npm run build && node scripts/run-integration.mjs",
+    "lint": "eslint src test",
+    "check:unit": "npm run typecheck && npm run lint && npm test && npm run build",
+    "check": "npm run check:unit && npm run test:integration",
+    "package:vsix": "npm run check && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.17.0",
+    "@types/vscode": "^1.121.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.8",
+    "eslint": "^10.8.0",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^3.2.4"
+  }
+}
