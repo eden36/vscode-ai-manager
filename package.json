@@ -2,9 +2,14 @@
   "name": "ai-manager",
   "displayName": "AI Manager",
   "description": "统一管理 OpenAI-compatible 渠道、模型目录和 VS Code Chat 模型绑定。",
-  "version": "0.3.0",
-  "publisher": "ai-manager",
+  "icon": "media/marketplace-icon.png",
+  "version": "1.0.0",
+  "publisher": "saltcoreyan",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/eden36/vscode-ai-manager.git"
+  },
   "engines": {
     "vscode": "^1.121.0"
   },
