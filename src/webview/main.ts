@@ -1,5 +1,6 @@
 import type { CatalogModel, ChannelConfig, ChatModelTarget, ChatSettingKey, DashboardState } from '../types';
 import type { ChatSettingSelections } from '../chat-settings';
+import { createChannelDefaults, isChannelPreset, PRESET_VALUES } from '../presets';
 
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void };
 
@@ -227,11 +228,7 @@ function renderModelRow(channel: ChannelConfig, model: CatalogModel): HTMLElemen
 function openChannelForm(channel?: ChannelConfig & { hasCredential?: boolean }): void {
   const dialog = byId<HTMLDialogElement>('channel-dialog');
   byId('channel-form-title').textContent = channel ? '编辑渠道' : '新增渠道';
-  const defaults = channel ?? {
-    id: '', name: '', preset: 'custom', baseUrl: '', modelsPath: '/v1/models', chatPath: '/v1/chat/completions',
-    anthropicPath: '/v1/messages', geminiPath: '/v1beta/models/{model}:streamGenerateContent?alt=sse', defaultProtocol: 'openai', authMode: 'bearer',
-    timeoutMs: 15000, refreshIntervalMinutes: 360, defaultMaxInputTokens: 128000, defaultMaxOutputTokens: 8192, enabled: true,
-  };
+  const defaults = channel ?? { id: '', name: '', ...createChannelDefaults('custom') };
   byId<HTMLInputElement>('channel-id').value = defaults.id;
   byId<HTMLSelectElement>('channel-preset').value = defaults.preset;
   byId<HTMLInputElement>('channel-name').value = defaults.name;
@@ -272,19 +269,15 @@ byId<HTMLInputElement>('channel-clear-api-key').addEventListener('change', (even
   if (clear) apiKey.value = '';
 });
 byId<HTMLSelectElement>('channel-preset').addEventListener('change', (event) => {
-  const values: Record<string, [string, string, string, string, string]> = {
-    custom: ['', '/v1/models', '/v1/chat/completions', '/v1/messages', '/v1beta/models/{model}:streamGenerateContent?alt=sse'],
-    'opencode-go': ['https://opencode.ai', '/zen/go/v1/models', '/zen/go/v1/chat/completions', '/zen/go/v1/messages', ''],
-    'opencode-console': ['https://console.opencode.ai', '/inference/openai/v1/models', '/inference/openai/v1/chat/completions', '', ''],
-  };
-  const selected = values[(event.target as HTMLSelectElement).value] ?? values.custom!;
-  byId<HTMLInputElement>('channel-base-url').value = selected[0];
-  byId<HTMLInputElement>('channel-models-path').value = selected[1];
-  byId<HTMLInputElement>('channel-chat-path').value = selected[2];
-  byId<HTMLInputElement>('channel-anthropic-path').value = selected[3];
-  byId<HTMLInputElement>('channel-gemini-path').value = selected[4];
-  byId<HTMLSelectElement>('channel-default-protocol').value = 'openai';
-  byId<HTMLSelectElement>('channel-auth-mode').value = 'bearer';
+  const preset = (event.target as HTMLSelectElement).value;
+  const selected = PRESET_VALUES[isChannelPreset(preset) ? preset : 'custom'];
+  byId<HTMLInputElement>('channel-base-url').value = selected.baseUrl;
+  byId<HTMLInputElement>('channel-models-path').value = selected.modelsPath;
+  byId<HTMLInputElement>('channel-chat-path').value = selected.chatPath;
+  byId<HTMLInputElement>('channel-anthropic-path').value = selected.anthropicPath ?? '';
+  byId<HTMLInputElement>('channel-gemini-path').value = selected.geminiPath ?? '';
+  byId<HTMLSelectElement>('channel-default-protocol').value = selected.defaultProtocol;
+  byId<HTMLSelectElement>('channel-auth-mode').value = selected.authMode;
 });
 byId<HTMLFormElement>('channel-form').addEventListener('submit', (event) => {
   event.preventDefault();

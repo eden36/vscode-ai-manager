@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { AppService } from './app-service';
 import { notifyCatalogChanges } from './catalog-notifications';
+import { CHANNEL_PRESETS } from './presets';
 import type { ChatBindingService, ChatSettingSelections } from './chat-settings';
 import type { ChatSettingKey } from './types';
 
@@ -130,6 +131,7 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
     const script = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'main.js'));
     const style = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'main.css'));
     const nonce = getNonce();
+    const presetOptions = CHANNEL_PRESETS.map((preset) => `<option value="${preset.id}">${preset.label}</option>`).join('');
     return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -157,7 +159,7 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
         <form id="channel-form" class="form-card">
           <div class="dialog-header"><h2 id="channel-form-title">新增渠道</h2><button id="cancel-channel" type="button" aria-label="关闭">关闭</button></div>
           <input id="channel-id" type="hidden">
-          <label>预设<select id="channel-preset"><option value="custom">通用 OpenAI-compatible</option><option value="opencode-go">OpenCode Go</option><option value="opencode-console">OpenCode Console</option></select></label>
+          <label>预设<select id="channel-preset">${presetOptions}</select></label>
           <label>名称<input id="channel-name" required maxlength="80"></label>
           <label>Base URL<input id="channel-base-url" required type="url"></label>
           <label>模型路径<input id="channel-models-path" required></label>

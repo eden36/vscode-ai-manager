@@ -1,7 +1,9 @@
 import type { ChannelConfig, ChannelPreset } from './types';
 
-export const PRESET_VALUES: Record<ChannelPreset, Pick<ChannelConfig, 'baseUrl' | 'modelsPath' | 'chatPath' | 'anthropicPath' | 'geminiPath' | 'defaultProtocol' | 'authMode'>> = {
-  custom: {
+type ChannelPresetValues = Pick<ChannelConfig, 'baseUrl' | 'modelsPath' | 'chatPath' | 'anthropicPath' | 'geminiPath' | 'defaultProtocol' | 'authMode'>;
+
+export const CHANNEL_PRESETS = [
+  { id: 'custom', label: '通用 OpenAI-compatible', values: {
     baseUrl: '',
     modelsPath: '/v1/models',
     chatPath: '/v1/chat/completions',
@@ -9,8 +11,8 @@ export const PRESET_VALUES: Record<ChannelPreset, Pick<ChannelConfig, 'baseUrl' 
     geminiPath: '/v1beta/models/{model}:streamGenerateContent?alt=sse',
     defaultProtocol: 'openai',
     authMode: 'bearer',
-  },
-  'opencode-go': {
+  } },
+  { id: 'opencode-go', label: 'OpenCode Go', values: {
     baseUrl: 'https://opencode.ai',
     modelsPath: '/zen/go/v1/models',
     chatPath: '/zen/go/v1/chat/completions',
@@ -18,8 +20,8 @@ export const PRESET_VALUES: Record<ChannelPreset, Pick<ChannelConfig, 'baseUrl' 
     geminiPath: undefined,
     defaultProtocol: 'openai',
     authMode: 'bearer',
-  },
-  'opencode-console': {
+  } },
+  { id: 'opencode-console', label: 'OpenCode Console', values: {
     baseUrl: 'https://console.opencode.ai',
     modelsPath: '/inference/openai/v1/models',
     chatPath: '/inference/openai/v1/chat/completions',
@@ -27,8 +29,106 @@ export const PRESET_VALUES: Record<ChannelPreset, Pick<ChannelConfig, 'baseUrl' 
     geminiPath: undefined,
     defaultProtocol: 'openai',
     authMode: 'bearer',
-  },
-};
+  } },
+  { id: 'openai', label: 'OpenAI', values: {
+    baseUrl: 'https://api.openai.com',
+    modelsPath: '/v1/models',
+    chatPath: '/v1/chat/completions',
+    anthropicPath: undefined,
+    geminiPath: undefined,
+    defaultProtocol: 'openai',
+    authMode: 'bearer',
+  } },
+  { id: 'anthropic', label: 'Anthropic', values: {
+    baseUrl: 'https://api.anthropic.com',
+    modelsPath: '/v1/models',
+    chatPath: '/v1/messages',
+    anthropicPath: '/v1/messages',
+    geminiPath: undefined,
+    defaultProtocol: 'anthropic',
+    authMode: 'anthropic-api-key',
+  } },
+  { id: 'gemini', label: 'Google Gemini', values: {
+    baseUrl: 'https://generativelanguage.googleapis.com',
+    modelsPath: '/v1beta/models',
+    chatPath: '/v1beta/models/{model}:streamGenerateContent?alt=sse',
+    anthropicPath: undefined,
+    geminiPath: '/v1beta/models/{model}:streamGenerateContent?alt=sse',
+    defaultProtocol: 'gemini',
+    authMode: 'google-api-key',
+  } },
+  { id: 'openrouter', label: 'OpenRouter', values: {
+    baseUrl: 'https://openrouter.ai',
+    modelsPath: '/api/v1/models',
+    chatPath: '/api/v1/chat/completions',
+    anthropicPath: undefined,
+    geminiPath: undefined,
+    defaultProtocol: 'openai',
+    authMode: 'bearer',
+  } },
+  { id: 'deepseek', label: 'DeepSeek', values: {
+    baseUrl: 'https://api.deepseek.com',
+    modelsPath: '/models',
+    chatPath: '/chat/completions',
+    anthropicPath: undefined,
+    geminiPath: undefined,
+    defaultProtocol: 'openai',
+    authMode: 'bearer',
+  } },
+  { id: 'siliconflow', label: 'SiliconFlow（硅基流动）', values: {
+    baseUrl: 'https://api.siliconflow.cn',
+    modelsPath: '/v1/models?type=text&sub_type=chat',
+    chatPath: '/v1/chat/completions',
+    anthropicPath: undefined,
+    geminiPath: undefined,
+    defaultProtocol: 'openai',
+    authMode: 'bearer',
+  } },
+  { id: 'mistral', label: 'Mistral', values: {
+    baseUrl: 'https://api.mistral.ai',
+    modelsPath: '/v1/models',
+    chatPath: '/v1/chat/completions',
+    anthropicPath: undefined,
+    geminiPath: undefined,
+    defaultProtocol: 'openai',
+    authMode: 'bearer',
+  } },
+  { id: 'groq', label: 'Groq', values: {
+    baseUrl: 'https://api.groq.com/openai',
+    modelsPath: '/v1/models',
+    chatPath: '/v1/chat/completions',
+    anthropicPath: undefined,
+    geminiPath: undefined,
+    defaultProtocol: 'openai',
+    authMode: 'bearer',
+  } },
+  { id: 'together', label: 'Together AI', values: {
+    baseUrl: 'https://api.together.xyz',
+    modelsPath: '/v1/models',
+    chatPath: '/v1/chat/completions',
+    anthropicPath: undefined,
+    geminiPath: undefined,
+    defaultProtocol: 'openai',
+    authMode: 'bearer',
+  } },
+  { id: 'xai', label: 'xAI', values: {
+    baseUrl: 'https://api.x.ai',
+    modelsPath: '/v1/language-models',
+    chatPath: '/v1/chat/completions',
+    anthropicPath: undefined,
+    geminiPath: undefined,
+    defaultProtocol: 'openai',
+    authMode: 'bearer',
+  } },
+] as const satisfies readonly { id: ChannelPreset; label: string; values: ChannelPresetValues }[];
+
+export const PRESET_VALUES = Object.fromEntries(
+  CHANNEL_PRESETS.map(({ id, values }) => [id, values]),
+) as Record<ChannelPreset, ChannelPresetValues>;
+
+export function isChannelPreset(value: unknown): value is ChannelPreset {
+  return typeof value === 'string' && CHANNEL_PRESETS.some((preset) => preset.id === value);
+}
 
 export function createChannelDefaults(preset: ChannelPreset = 'custom'): Omit<ChannelConfig, 'id' | 'name'> {
   return {

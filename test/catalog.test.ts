@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CatalogService, inferProtocol, joinEndpoint, parseModelCatalog } from '../src/catalog';
 import { createModelProviderId } from '../src/models';
+import { createChannelDefaults } from '../src/presets';
+import type { ChannelPreset } from '../src/types';
 import { channel, model } from './fixtures';
 
 describe('parseModelCatalog', () => {
@@ -37,6 +39,17 @@ describe('parseModelCatalog', () => {
     const geminiChannel = channel({ defaultProtocol: 'gemini', authMode: 'google-api-key' });
     expect(parseModelCatalog({ models: [{ name: 'models/gemini-test', displayName: 'Gemini Test' }] }, geminiChannel)[0])
       .toMatchObject({ id: 'gemini-test', name: 'Gemini Test', protocol: 'gemini' });
+  });
+
+  it('按原生 Anthropic 和 Gemini 预设解析协议', () => {
+    const anthropicChannel = channel(createChannelDefaults('anthropic'));
+    const geminiChannel = channel(createChannelDefaults('gemini'));
+    expect(parseModelCatalog({ data: [{ id: 'claude-test' }] }, anthropicChannel)[0]?.protocol).toBe('anthropic');
+    expect(parseModelCatalog({ models: [{ name: 'models/gemini-test' }] }, geminiChannel)[0]?.protocol).toBe('gemini');
+  });
+
+  it.each<ChannelPreset>(['openai', 'openrouter', 'deepseek', 'siliconflow', 'mistral', 'groq', 'together', 'xai'])('按 %s 预设解析 OpenAI 协议', (preset) => {
+    expect(parseModelCatalog({ data: [{ id: 'model-test' }] }, channel(createChannelDefaults(preset)))[0]?.protocol).toBe('openai');
   });
 
   it('忽略目录中的重复模型 ID', () => {

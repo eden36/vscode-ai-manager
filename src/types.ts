@@ -1,4 +1,17 @@
-export type ChannelPreset = 'custom' | 'opencode-go' | 'opencode-console';
+export type ChannelPreset =
+  | 'custom'
+  | 'opencode-go'
+  | 'opencode-console'
+  | 'openai'
+  | 'anthropic'
+  | 'gemini'
+  | 'openrouter'
+  | 'deepseek'
+  | 'siliconflow'
+  | 'mistral'
+  | 'groq'
+  | 'together'
+  | 'xai';
 export type ModelProtocol = 'openai' | 'anthropic' | 'gemini' | 'unknown';
 export type ChannelAuthMode = 'bearer' | 'anthropic-api-key' | 'google-api-key';
 export type ChatSettingKey =

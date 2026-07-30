@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { joinEndpoint, CatalogService } from './catalog';
 import type { ChatBindingService } from './chat-settings';
-import { createChannelDefaults } from './presets';
+import { createChannelDefaults, isChannelPreset } from './presets';
 import { createModelProviderId, getProtocolPath } from './models';
 import { StorageService } from './storage';
 import type { SyncService } from './sync';
@@ -211,7 +211,7 @@ export class AppService implements vscode.Disposable {
   }
 
   private parsePreset(value: unknown): ChannelPreset {
-    return value === 'opencode-go' || value === 'opencode-console' ? value : 'custom';
+    return isChannelPreset(value) ? value : 'custom';
   }
 
   private requiredText(value: unknown, label: string): string {

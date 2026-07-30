@@ -12,7 +12,7 @@ AI Manager 是一个 VS Code 桌面扩展，用于集中管理 OpenAI-compatible
 
 ## 核心功能
 
-- 管理 OpenCode Go、OpenCode Console 和自定义 OpenAI-compatible 渠道。
+- 内置 OpenCode、OpenAI、Anthropic、Google Gemini、OpenRouter、DeepSeek、SiliconFlow、Mistral、Groq、Together AI 和 xAI 等渠道预设，并支持自定义 OpenAI-compatible 渠道。
 - 刷新模型目录，并保留最近一次成功获取的缓存。
 - 为发现的模型设置别名、筛选条件、元数据和启用状态。
 - 将已启用的模型注册到 VS Code 原生 Chat 模型选择器。

@@ -1,5 +1,6 @@
 :root { color-scheme: light dark; }
 html { overflow-y: auto; scrollbar-gutter: stable; }
+html:has(.channel-dialog[open]) { overflow-y: hidden; }
 * { box-sizing: border-box; }
 body { margin: 0; color: var(--vscode-foreground); background: var(--vscode-sideBar-background); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); }
 button, input, select { font: inherit; }
@@ -22,7 +23,7 @@ h2 { font-size: 14px; margin: 0 0 10px; }
 .model-toolbar label { color: var(--vscode-descriptionForeground); font-size: 11px; }
 .model-toolbar input, .model-toolbar select { width: 100%; min-height: 30px; margin-top: 3px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-panel-border); padding: 5px; }
 .card { border: 1px solid var(--vscode-panel-border); padding: 10px; margin-bottom: 8px; background: var(--vscode-editor-background); }
-.channel-dialog { width: calc(100% - 24px); max-width: 680px; max-height: calc(100vh - 24px); padding: 0; color: var(--vscode-foreground); background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); }
+.channel-dialog { width: calc(100% - 24px); max-width: 680px; max-height: calc(100vh - 24px); padding: 0; overflow: hidden; color: var(--vscode-foreground); background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); }
 .channel-dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
 .channel-dialog .form-card { max-height: calc(100vh - 24px); margin: 0; padding: 12px; overflow-y: auto; }
 .dialog-header { display: flex; position: sticky; top: -12px; z-index: 1; align-items: center; justify-content: space-between; margin: -12px -12px 12px; padding: 12px; background: var(--vscode-editor-background); border-bottom: 1px solid var(--vscode-panel-border); }
