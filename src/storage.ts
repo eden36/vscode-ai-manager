@@ -1,21 +1,22 @@
 import * as vscode from 'vscode';
+import type { EncryptedVault, SyncProfile } from './sync';
 import type { CatalogModel, ChannelConfig, ChatBindingRecord } from './types';
 
 const CHANNELS_KEY = 'aiManager.channels';
 const MODELS_KEY = 'aiManager.models';
-const ALIASES_KEY = 'aiManager.aliases';
 const BINDINGS_KEY = 'aiManager.chatBindings';
-const SCHEMA_VERSION_KEY = 'aiManager.schemaVersion';
-
-export interface LegacyAlias {
-  id: string;
-  name: string;
-}
+const SYNC_PROFILE_KEY = 'aiManager.sync.profile.v1';
+const SYNC_VAULT_KEY = 'aiManager.sync.vault.v1';
+const SYNC_LOCAL_KEY = 'aiManager.sync.localKey.v1';
 
 export class StorageService {
   private stateWriteQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly context: vscode.ExtensionContext) {}
+
+  registerSyncKeys(): void {
+    this.context.globalState.setKeysForSync([SYNC_PROFILE_KEY, SYNC_VAULT_KEY]);
+  }
 
   getChannels(): ChannelConfig[] {
     return this.context.globalState.get<ChannelConfig[]>(CHANNELS_KEY, []);
@@ -57,20 +58,6 @@ export class StorageService {
     await this.enqueueStateWrite(() => this.context.globalState.update(BINDINGS_KEY, bindings));
   }
 
-  getSchemaVersion(): number {
-    return this.context.globalState.get<number>(SCHEMA_VERSION_KEY, 1);
-  }
-
-  getLegacyAliases(): LegacyAlias[] {
-    return this.context.globalState.get<LegacyAlias[]>(ALIASES_KEY, []);
-  }
-
-  async completeModelSchemaMigration(models: CatalogModel[]): Promise<void> {
-    await this.saveModels(models);
-    await this.context.globalState.update(ALIASES_KEY, undefined);
-    await this.context.globalState.update(SCHEMA_VERSION_KEY, 2);
-  }
-
   async getApiKey(channelId: string): Promise<string | undefined> {
     return this.context.secrets.get(this.secretKey(channelId));
   }
@@ -88,6 +75,34 @@ export class StorageService {
 
   async deleteApiKey(channelId: string): Promise<void> {
     await this.context.secrets.delete(this.secretKey(channelId));
+  }
+
+  getSyncProfile(): SyncProfile | undefined {
+    return this.context.globalState.get<SyncProfile>(SYNC_PROFILE_KEY);
+  }
+
+  async saveSyncProfile(profile: SyncProfile | undefined): Promise<void> {
+    await this.enqueueStateWrite(() => this.context.globalState.update(SYNC_PROFILE_KEY, profile));
+  }
+
+  getSyncVault(): EncryptedVault | undefined {
+    return this.context.globalState.get<EncryptedVault>(SYNC_VAULT_KEY);
+  }
+
+  async saveSyncVault(vault: EncryptedVault | undefined): Promise<void> {
+    await this.enqueueStateWrite(() => this.context.globalState.update(SYNC_VAULT_KEY, vault));
+  }
+
+  async getSyncLocalKey(): Promise<string | undefined> {
+    return this.context.secrets.get(SYNC_LOCAL_KEY);
+  }
+
+  async saveSyncLocalKey(key: string): Promise<void> {
+    await this.context.secrets.store(SYNC_LOCAL_KEY, key);
+  }
+
+  async deleteSyncLocalKey(): Promise<void> {
+    await this.context.secrets.delete(SYNC_LOCAL_KEY);
   }
 
   private secretKey(channelId: string): string {

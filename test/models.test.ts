@@ -1,8 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { estimateTokens, getExposedModels, getModelDisplayName, sortCatalogModels } from '../src/models';
+import { createModelProviderId, estimateTokens, getExposedModels, getModelDisplayName, sortCatalogModels } from '../src/models';
 import { channel, model } from './fixtures';
 
 describe('模型显示与排序', () => {
+  it('相同渠道和模型在不同设备生成相同 providerId', () => {
+    const first = channel({ id: 'device-a-channel', name: '设备 A' });
+    const second = channel({ id: 'device-b-channel', name: '设备 B' });
+    expect(createModelProviderId(first, 'gpt-test')).toBe(createModelProviderId(second, 'gpt-test'));
+    expect(createModelProviderId(first, 'gpt-test')).not.toBe(createModelProviderId(first, 'other-model'));
+    expect(createModelProviderId(first, 'gpt-test')).not.toBe(createModelProviderId(channel({ baseUrl: 'https://other.example.com' }), 'gpt-test'));
+  });
+
   it('使用自定义别名或渠道名加模型名作为默认值', () => {
     expect(getModelDisplayName(model(), channel())).toBe('测试渠道： Model 1');
     expect(getModelDisplayName(model({ customAlias: '快速模型' }), channel())).toBe('快速模型');

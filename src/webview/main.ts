@@ -3,10 +3,13 @@ import type { CatalogModel, ChannelConfig, ChatModelTarget, ChatSettingKey, Dash
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void };
 
 const vscode = acquireVsCodeApi();
-let state: DashboardState = { channels: [], models: [], chatBindings: {} };
+let state: DashboardState = { channels: [], models: [], chatBindings: {}, sync: { enabled: false, locked: false, hasVault: false } };
 const openModelChannels = new Set<string>();
 let chatBindingsRendered = false;
 let lastStateRevision = -1;
+let syncOperationPending = false;
+
+const syncOperations = ['enableSync', 'unlockSync', 'changeSyncPassword', 'resetSync'];
 
 const byId = <T extends HTMLElement>(id: string): T => {
   const element = document.getElementById(id);
@@ -34,8 +37,19 @@ window.addEventListener('message', (event: MessageEvent) => {
   } else if (message.type === 'operationSucceeded') {
     if (message.operation === 'saveChannel') closeChannelDialog();
     if (message.operation === 'applyChatSettings' || message.operation === 'restoreChatSetting') chatBindingsRendered = false;
+    if (syncOperations.includes(message.operation ?? '')) {
+      syncOperationPending = false;
+      clearSyncPasswords();
+      renderSync();
+    }
+  } else if (message.type === 'operationCancelled' && syncOperations.includes(message.operation ?? '')) {
+    syncOperationPending = false;
+    renderSync();
   } else if (message.type === 'operationFailed' && message.operation === 'saveChannel') {
     byId<HTMLButtonElement>('save-channel').disabled = false;
+  } else if (message.type === 'operationFailed' && syncOperations.includes(message.operation ?? '')) {
+    syncOperationPending = false;
+    renderSync();
   }
 });
 
@@ -46,6 +60,7 @@ function send(type: string, payload?: unknown): void {
 function render(): void {
   renderChannels();
   renderChatBindings();
+  renderSync();
 }
 
 function button(text: string, onClick: () => void, className = ''): HTMLButtonElement {
@@ -400,6 +415,52 @@ byId<HTMLFormElement>('chat-form').addEventListener('submit', (event) => {
   }
   send('applyChatSettings', payload);
 });
+
+function renderSync(): void {
+  const { enabled, locked, hasVault } = state.sync;
+  const status = byId('sync-status');
+  const statusType = syncOperationPending ? 'syncing' : enabled && !locked ? 'synced' : 'unsynced';
+  status.className = `status sync-status ${statusType}`;
+  status.textContent = statusType === 'syncing' ? '同步中' : statusType === 'synced' ? '已同步' : '未同步';
+  status.title = syncOperationPending
+    ? '正在同步配置和加密保险库。'
+    : locked
+      ? '已收到同步保险库，当前电脑需要输入主密码解锁。'
+      : enabled ? '同步已启用，当前电脑已解锁。' : '尚未启用 AI Manager 跨设备同步。';
+  byId<HTMLFormElement>('sync-enable-form').hidden = enabled || hasVault;
+  byId<HTMLFormElement>('sync-unlock-form').hidden = !locked;
+  byId<HTMLFormElement>('sync-change-form').hidden = !enabled || locked;
+  byId<HTMLButtonElement>('sync-reset').hidden = !hasVault;
+}
+
+byId<HTMLFormElement>('sync-enable-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  sendSyncOperation('enableSync', { password: value('sync-enable-password'), confirmation: value('sync-enable-confirmation') });
+});
+
+byId<HTMLFormElement>('sync-unlock-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  sendSyncOperation('unlockSync', { password: value('sync-unlock-password') });
+});
+
+byId<HTMLFormElement>('sync-change-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  sendSyncOperation('changeSyncPassword', { password: value('sync-change-password'), confirmation: value('sync-change-confirmation') });
+});
+
+byId<HTMLButtonElement>('sync-reset').addEventListener('click', () => sendSyncOperation('resetSync'));
+
+function sendSyncOperation(type: string, payload?: unknown): void {
+  syncOperationPending = true;
+  renderSync();
+  send(type, payload);
+}
+
+function clearSyncPasswords(): void {
+  for (const id of ['sync-enable-password', 'sync-enable-confirmation', 'sync-unlock-password', 'sync-change-password', 'sync-change-confirmation']) {
+    byId<HTMLInputElement>(id).value = '';
+  }
+}
 
 function option(value: string, label: string): HTMLOptionElement {
   const result = document.createElement('option');

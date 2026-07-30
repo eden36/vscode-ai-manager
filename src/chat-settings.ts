@@ -149,6 +149,21 @@ export class ChatBindingService {
           retained.push(binding);
         }
       }
+      for (const entry of SETTING_ENTRIES) {
+        if (retained.some((binding) => binding.setting === entry.key)) continue;
+        const currentGlobalValue = configuration.inspect(entry.key)?.globalValue;
+        if (typeof currentGlobalValue !== 'string') continue;
+        const candidate = models.find((model) => {
+          const channel = channels.find((item) => item.id === model.channelId);
+          return channel && isModelUsable(model, channel) && this.settingValue(entry.key, channel, model) === currentGlobalValue;
+        });
+        if (candidate) retained.push({
+          setting: entry.key,
+          providerId: candidate.providerId,
+          appliedValue: currentGlobalValue,
+          previousHadGlobalValue: false,
+        });
+      }
       await this.storage.saveChatBindings(retained);
     } catch (error) {
       await this.rollbackSettings(configuration, snapshots);

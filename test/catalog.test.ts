@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CatalogService, inferProtocol, joinEndpoint, parseModelCatalog } from '../src/catalog';
+import { createModelProviderId } from '../src/models';
 import { channel, model } from './fixtures';
 
 describe('parseModelCatalog', () => {
@@ -71,10 +72,10 @@ describe('CatalogService 目录合并', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'kept' }, { id: 'new' }, { id: 'back' }] }), { status: 200 })));
     const result = await new CatalogService(storage as any).refreshChannel('channel-1');
     expect(result.change).toMatchObject({ initialized: false, added: ['new'], removed: ['removed'], reappeared: ['back'] });
-    expect(models.find((item) => item.id === 'kept')).toMatchObject({ providerId: 'stable-kept', customAlias: '保留别名', enabled: true });
+    expect(models.find((item) => item.id === 'kept')).toMatchObject({ providerId: createModelProviderId(channel(), 'kept'), customAlias: '保留别名', enabled: true });
     expect(models.find((item) => item.id === 'new')).toMatchObject({ enabled: false, available: true });
     expect(models.find((item) => item.id === 'removed')).toMatchObject({ providerId: 'stable-removed', available: false });
-    expect(models.find((item) => item.id === 'back')).toMatchObject({ providerId: 'stable-back', enabled: true, available: true });
+    expect(models.find((item) => item.id === 'back')).toMatchObject({ providerId: createModelProviderId(channel(), 'back'), enabled: true, available: true });
   });
 
   it('合法空目录会将已有模型标记为不可用', async () => {

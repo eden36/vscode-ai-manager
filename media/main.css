@@ -30,6 +30,10 @@ h2 { font-size: 14px; margin: 0 0 10px; }
 .card-title { font-weight: 600; overflow-wrap: anywhere; }
 .status { margin: 6px 0; color: var(--vscode-descriptionForeground); overflow-wrap: anywhere; }
 .status.error { color: var(--vscode-errorForeground); }
+.sync-status { font-weight: 600; }
+.sync-status.synced { color: var(--vscode-testing-iconPassed, #3fb950); }
+.sync-status.syncing { color: var(--vscode-progressBar-background, var(--vscode-charts-blue, #3794ff)); }
+.sync-status.unsynced { color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground)); }
 .badge { display: inline-block; padding: 1px 5px; margin-right: 4px; border: 1px solid var(--vscode-panel-border); font-size: 11px; }
 .channel-state { font-weight: 600; cursor: pointer; }
 .channel-state:disabled { cursor: wait; opacity: 0.7; }

@@ -77,4 +77,11 @@ export interface DashboardState {
   channels: Array<ChannelConfig & { hasCredential: boolean }>;
   models: CatalogModel[];
   chatBindings: Partial<Record<ChatSettingKey, ChatModelTarget>>;
+  sync: SyncStatus;
+}
+
+export interface SyncStatus {
+  enabled: boolean;
+  locked: boolean;
+  hasVault: boolean;
 }

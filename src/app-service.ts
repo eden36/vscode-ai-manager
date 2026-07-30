@@ -4,6 +4,7 @@ import { joinEndpoint, CatalogService } from './catalog';
 import type { ChatBindingService } from './chat-settings';
 import { createChannelDefaults } from './presets';
 import { StorageService } from './storage';
+import type { SyncService } from './sync';
 import type { CatalogChange, CatalogModel, CatalogRefreshSummary, ChannelConfig, ChannelPreset, DashboardState, ModelProtocol } from './types';
 
 interface SaveChannelInput extends Partial<ChannelConfig> {
@@ -30,6 +31,7 @@ export class AppService implements vscode.Disposable {
     readonly storage: StorageService,
     readonly catalog: CatalogService,
     readonly chatBindings: ChatBindingService,
+    readonly sync: SyncService,
   ) {}
 
   dispose(): void {
@@ -41,11 +43,13 @@ export class AppService implements vscode.Disposable {
       channels: await Promise.all(this.storage.getChannels().map(async (channel) => ({ ...channel, hasCredential: await this.storage.hasApiKey(channel.id) }))),
       models: this.storage.getModels(),
       chatBindings: this.chatBindings.getSelections(),
+      sync: this.sync.getStatus(),
     };
   }
 
   async saveChannel(input: SaveChannelInput): Promise<ChannelConfig> {
     if (input.clearApiKey && input.apiKey?.trim()) throw new Error('不能同时填写并清除 API Key');
+    if (input.clearApiKey || input.apiKey?.trim()) this.sync.assertUnlocked();
     let channel: ChannelConfig | undefined;
     await this.storage.updateChannels((channels) => {
       const existing = input.id ? channels.find((item) => item.id === input.id) : undefined;
@@ -72,8 +76,9 @@ export class AppService implements vscode.Disposable {
       return existing ? channels.map((item) => item.id === channel!.id ? channel! : item) : [...channels, channel];
     });
     if (!channel) throw new Error('渠道保存失败');
-    if (input.clearApiKey) await this.storage.deleteApiKey(channel.id);
-    else if (typeof input.apiKey === 'string' && input.apiKey.trim()) await this.storage.saveApiKey(channel.id, input.apiKey);
+    if (input.clearApiKey) await this.sync.saveCredential(channel.id, undefined);
+    else if (typeof input.apiKey === 'string' && input.apiKey.trim()) await this.sync.saveCredential(channel.id, input.apiKey);
+    await this.sync.saveProfileFromLocal();
     await this.chatBindings.reconcile();
     this.changeEmitter.fire();
     return channel;
@@ -84,26 +89,37 @@ export class AppService implements vscode.Disposable {
       if (!channels.some((item) => item.id === channelId)) throw new Error('渠道不存在');
       return channels.map((item) => item.id === channelId ? { ...item, enabled: !item.enabled } : item);
     });
+    await this.sync.saveProfileFromLocal();
     await this.chatBindings.reconcile();
     this.changeEmitter.fire();
   }
 
   async deleteChannel(channelId: string): Promise<void> {
+    this.sync.assertUnlocked();
     await this.storage.updateChannels((channels) => channels.filter((channel) => channel.id !== channelId));
     await this.storage.updateModels((models) => models.filter((model) => model.channelId !== channelId));
-    await this.storage.deleteApiKey(channelId);
+    await this.sync.saveCredential(channelId, undefined);
+    await this.sync.saveProfileFromLocal();
     await this.chatBindings.reconcile();
     this.changeEmitter.fire();
   }
 
   async refreshChannel(channelId: string): Promise<CatalogChange> {
+    await this.sync.reconcile();
+    this.sync.assertUnlocked();
     const result = await this.catalog.refreshChannel(channelId);
     await this.chatBindings.reconcile();
     this.changeEmitter.fire();
     return result.change;
   }
 
-  async refreshAll(dueOnly = false): Promise<CatalogRefreshSummary> {
+  async refreshAll(dueOnly = false, skipWhenLocked = false): Promise<CatalogRefreshSummary> {
+    await this.sync.reconcile();
+    if (this.sync.getStatus().locked) {
+      if (!skipWhenLocked) throw new Error('请先解锁 API Key 同步');
+      this.changeEmitter.fire();
+      return { changes: [], failures: [] };
+    }
     const summary = await this.catalog.refreshAll(dueOnly);
     await this.chatBindings.reconcile();
     this.changeEmitter.fire();
@@ -134,7 +150,31 @@ export class AppService implements vscode.Disposable {
       };
       return models.map((item) => item.channelId === updated.channelId && item.id === updated.id ? updated : item);
     });
+    await this.sync.saveProfileFromLocal();
     await this.chatBindings.reconcile();
+    this.changeEmitter.fire();
+  }
+
+  async enableSync(password: string, confirmation: string): Promise<void> {
+    this.assertMatchingPasswords(password, confirmation);
+    await this.sync.enable(password);
+    this.changeEmitter.fire();
+  }
+
+  async unlockSync(password: string): Promise<CatalogRefreshSummary> {
+    await this.sync.unlock(password);
+    this.changeEmitter.fire();
+    return this.refreshAll(false, true);
+  }
+
+  async changeSyncPassword(password: string, confirmation: string): Promise<void> {
+    this.assertMatchingPasswords(password, confirmation);
+    await this.sync.changePassword(password);
+    this.changeEmitter.fire();
+  }
+
+  async resetSync(): Promise<void> {
+    await this.sync.reset();
     this.changeEmitter.fire();
   }
 
@@ -156,5 +196,9 @@ export class AppService implements vscode.Disposable {
     const number = typeof value === 'number' ? value : Number(value);
     if (!Number.isInteger(number) || number < min || number > max) throw new Error(`${label}必须是 ${min} 到 ${max} 之间的整数`);
     return number;
+  }
+
+  private assertMatchingPasswords(password: string, confirmation: string): void {
+    if (password !== confirmation) throw new Error('两次输入的同步主密码不一致');
   }
 }

@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto';
 import type { CatalogChange, CatalogModel, CatalogRefreshSummary, ChannelConfig, ModelProtocol } from './types';
 import { classifyHttpError, RequestError, safeErrorMessage } from './errors';
+import { createModelProviderId } from './models';
 import { StorageService } from './storage';
+import type { SyncService } from './sync';
 
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
@@ -86,7 +87,7 @@ export function joinEndpoint(baseUrl: string, path: string): string {
 export class CatalogService {
   private readonly refreshing = new Map<string, Promise<{ models: CatalogModel[]; change: CatalogChange }>>();
 
-  constructor(private readonly storage: StorageService) {}
+  constructor(private readonly storage: StorageService, private readonly sync?: SyncService) {}
 
   async refreshChannel(channelId: string): Promise<{ models: CatalogModel[]; change: CatalogChange }> {
     const active = this.refreshing.get(channelId);
@@ -136,13 +137,14 @@ export class CatalogService {
           const protocol = old?.metadataOverridden ? old.protocol : model.protocol;
           const stable = {
             ...model,
-            providerId: old?.providerId || randomUUID(),
+            providerId: createModelProviderId(channel, model.id),
             customAlias: old?.customAlias,
             enabled: protocol === 'openai' ? old?.enabled ?? false : false,
           };
-          return old?.metadataOverridden
+          const mergedModel = old?.metadataOverridden
             ? { ...stable, protocol: old.protocol, maxInputTokens: old.maxInputTokens, maxOutputTokens: old.maxOutputTokens, toolCalling: old.toolCalling, metadataOverridden: true }
             : stable;
+          return this.sync?.applyPreference(mergedModel) ?? mergedModel;
         });
         for (const old of previous) {
           if (!discoveredIds.has(old.id)) merged.push({ ...old, available: false });
@@ -157,6 +159,7 @@ export class CatalogService {
         };
         return [...allModels.filter((model) => model.channelId !== channel.id), ...merged];
       });
+      await this.sync?.saveProfileFromLocal();
       await this.updateRefreshStatus(channel.id, Date.now(), undefined);
       return { models: merged, change: change! };
     } catch (error) {

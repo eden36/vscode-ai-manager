@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import * as vscode from 'vscode';
 
 export async function run(): Promise<void> {
-  const extension = vscode.extensions.getExtension('ai-manager.ai-manager');
+  const extension = vscode.extensions.getExtension('saltcoreyan.ai-manager');
   assert.ok(extension, 'AI Manager 扩展应已加载');
   await extension.activate();
 

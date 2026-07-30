@@ -13,6 +13,13 @@ AI Manager 是一个 VS Code 桌面扩展，用于统一管理 OpenAI-compatible
 - 绑定模型失效时安全恢复绑定前的用户级 Chat 设置，也可以主动解除绑定。
 - API Key 使用 VS Code `SecretStorage` 保存，不写入配置、缓存或日志。
 - 支持在渠道编辑界面单独清除已保存的 API Key。
+- 可通过 VS Code Settings Sync 跨设备同步渠道、模型偏好和加密后的 API Key。
+
+## 跨设备同步
+
+在“同步”页面创建同步主密码后，扩展会使用 PBKDF2-SHA256 和 AES-256-GCM 加密现有 API Key，并将密文与可移植配置交给 VS Code Settings Sync。同步主密码不能为空，但不限制长度；原始主密码不会保存，本机只在 `SecretStorage` 中保存派生密钥。
+
+在新电脑上登录同一 VS Code 账号并启用 Settings Sync 后，AI Manager 会恢复渠道和模型偏好，并提示输入一次同步主密码。忘记主密码时只能重置保险库；重置会清除同步密文和本机 API Key，无法恢复旧密钥。
 
 扩展只调用 OpenAI Chat Completions。新发现模型默认不启用；OpenCode Go 的目录不提供协议元数据，扩展会标记已知的 Messages 模型，也可以在模型详情中手动修正协议和能力。
 
@@ -30,4 +37,4 @@ npm run package:vsix
 
 ## 隐私
 
-请求日志仅包含渠道、别名、实际模型、耗时、状态码和错误类别。扩展不会记录提示词、响应正文或凭据，也不会读取本机 OpenCode 的认证文件。
+请求日志仅包含渠道、别名、实际模型、耗时、状态码和错误类别。扩展不会记录提示词、响应正文、凭据、同步主密码或派生密钥，也不会读取本机 OpenCode 的认证文件。
