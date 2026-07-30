@@ -51,45 +51,66 @@ export class AppService implements vscode.Disposable {
   async saveChannel(input: SaveChannelInput): Promise<ChannelConfig> {
     if (input.clearApiKey && input.apiKey?.trim()) throw new Error('不能同时填写并清除 API Key');
     if (input.clearApiKey || input.apiKey?.trim()) this.sync.assertUnlocked();
+    const previousChannels = this.storage.getChannels();
+    const existing = input.id ? previousChannels.find((item) => item.id === input.id) : undefined;
+    if (input.id && !existing) throw new Error('渠道不存在');
+    const channelId = existing?.id ?? randomUUID();
+    const previousApiKey = await this.storage.getApiKey(channelId);
+    const previousProfile = this.storage.getSyncProfile();
+    const previousVault = this.storage.getSyncVault();
     let channel: ChannelConfig | undefined;
-    await this.storage.updateChannels((channels) => {
-      const existing = input.id ? channels.find((item) => item.id === input.id) : undefined;
-      if (input.id && !existing) throw new Error('渠道不存在');
-      const preset = this.parsePreset(input.preset);
-      const defaults = createChannelDefaults(preset);
-      channel = {
-        ...defaults,
-        ...existing,
-        id: existing?.id ?? randomUUID(),
-        name: this.requiredText(input.name ?? existing?.name, '渠道名称'),
-        preset,
-        baseUrl: this.requiredText(input.baseUrl ?? existing?.baseUrl ?? defaults.baseUrl, 'Base URL').replace(/\/+$/, ''),
-        modelsPath: this.normalizedPath(input.modelsPath ?? existing?.modelsPath ?? defaults.modelsPath),
-        chatPath: this.normalizedPath(input.chatPath ?? existing?.chatPath ?? defaults.chatPath),
-        anthropicPath: this.optionalPath(input.anthropicPath ?? existing?.anthropicPath ?? defaults.anthropicPath),
-        geminiPath: this.optionalPath(input.geminiPath ?? existing?.geminiPath ?? defaults.geminiPath),
-        defaultProtocol: this.parseDefaultProtocol(input.defaultProtocol ?? existing?.defaultProtocol ?? defaults.defaultProtocol),
-        authMode: this.parseAuthMode(input.authMode ?? existing?.authMode ?? defaults.authMode),
-        enabled: input.enabled ?? existing?.enabled ?? true,
-        timeoutMs: this.boundedInteger(input.timeoutMs ?? existing?.timeoutMs ?? defaults.timeoutMs, 1_000, 120_000, '超时时间'),
-        refreshIntervalMinutes: this.boundedInteger(input.refreshIntervalMinutes ?? existing?.refreshIntervalMinutes ?? defaults.refreshIntervalMinutes, 5, 10_080, '刷新周期'),
-        defaultMaxInputTokens: this.boundedInteger(input.defaultMaxInputTokens ?? existing?.defaultMaxInputTokens ?? defaults.defaultMaxInputTokens, 1_024, 10_000_000, '默认输入上限'),
-        defaultMaxOutputTokens: this.boundedInteger(input.defaultMaxOutputTokens ?? existing?.defaultMaxOutputTokens ?? defaults.defaultMaxOutputTokens, 256, 1_000_000, '默认输出上限'),
-      };
-      joinEndpoint(channel.baseUrl, channel.modelsPath);
-      joinEndpoint(channel.baseUrl, channel.chatPath);
-      if (channel.anthropicPath) joinEndpoint(channel.baseUrl, channel.anthropicPath);
-      if (channel.geminiPath) {
-        if (!channel.geminiPath.includes('{model}')) throw new Error('Gemini 路径必须包含 {model} 占位符');
-        joinEndpoint(channel.baseUrl, channel.geminiPath.replace('{model}', 'test-model'));
+    try {
+      await this.storage.updateChannels((channels) => {
+        const preset = this.parsePreset(input.preset);
+        const defaults = createChannelDefaults(preset);
+        channel = {
+          ...defaults,
+          ...existing,
+          id: channelId,
+          name: this.requiredText(input.name ?? existing?.name, '渠道名称'),
+          preset,
+          baseUrl: this.requiredText(input.baseUrl ?? existing?.baseUrl ?? defaults.baseUrl, 'Base URL').replace(/\/+$/, ''),
+          modelsPath: this.normalizedPath(input.modelsPath ?? existing?.modelsPath ?? defaults.modelsPath),
+          chatPath: this.normalizedPath(input.chatPath ?? existing?.chatPath ?? defaults.chatPath),
+          anthropicPath: this.optionalPath(input.anthropicPath ?? existing?.anthropicPath ?? defaults.anthropicPath),
+          geminiPath: this.optionalPath(input.geminiPath ?? existing?.geminiPath ?? defaults.geminiPath),
+          defaultProtocol: this.parseDefaultProtocol(input.defaultProtocol ?? existing?.defaultProtocol ?? defaults.defaultProtocol),
+          authMode: this.parseAuthMode(input.authMode ?? existing?.authMode ?? defaults.authMode),
+          enabled: input.enabled ?? existing?.enabled ?? true,
+          timeoutMs: this.boundedInteger(input.timeoutMs ?? existing?.timeoutMs ?? defaults.timeoutMs, 1_000, 120_000, '超时时间'),
+          refreshIntervalMinutes: this.boundedInteger(input.refreshIntervalMinutes ?? existing?.refreshIntervalMinutes ?? defaults.refreshIntervalMinutes, 5, 10_080, '刷新周期'),
+          defaultMaxInputTokens: this.boundedInteger(input.defaultMaxInputTokens ?? existing?.defaultMaxInputTokens ?? defaults.defaultMaxInputTokens, 1_024, 10_000_000, '默认输入上限'),
+          defaultMaxOutputTokens: this.boundedInteger(input.defaultMaxOutputTokens ?? existing?.defaultMaxOutputTokens ?? defaults.defaultMaxOutputTokens, 256, 1_000_000, '默认输出上限'),
+        };
+        joinEndpoint(channel.baseUrl, channel.modelsPath);
+        joinEndpoint(channel.baseUrl, channel.chatPath);
+        if (channel.anthropicPath) joinEndpoint(channel.baseUrl, channel.anthropicPath);
+        if (channel.geminiPath) {
+          if (!channel.geminiPath.includes('{model}')) throw new Error('Gemini 路径必须包含 {model} 占位符');
+          joinEndpoint(channel.baseUrl, channel.geminiPath.replace('{model}', 'test-model'));
+        }
+        return existing ? channels.map((item) => item.id === channelId ? channel! : item) : [...channels, channel];
+      });
+      if (!channel) throw new Error('渠道保存失败');
+      if (input.clearApiKey) await this.sync.saveCredential(channel.id, undefined);
+      else if (typeof input.apiKey === 'string' && input.apiKey.trim()) await this.sync.saveCredential(channel.id, input.apiKey);
+      await this.sync.saveProfileFromLocal();
+      await this.chatBindings.reconcile();
+    } catch (error) {
+      const rollback = await Promise.allSettled([
+        this.storage.updateChannels((channels) => existing
+          ? channels.map((item) => item.id === channelId ? existing : item)
+          : channels.filter((item) => item.id !== channelId)),
+        previousApiKey === undefined ? this.storage.deleteApiKey(channelId) : this.storage.saveApiKey(channelId, previousApiKey),
+        this.storage.saveSyncProfile(previousProfile),
+        this.storage.saveSyncVault(previousVault),
+      ]);
+      if (rollback.some((result) => result.status === 'rejected')) {
+        throw new Error('渠道保存失败，且无法完整恢复原配置', { cause: error });
       }
-      return existing ? channels.map((item) => item.id === channel!.id ? channel! : item) : [...channels, channel];
-    });
+      throw error;
+    }
     if (!channel) throw new Error('渠道保存失败');
-    if (input.clearApiKey) await this.sync.saveCredential(channel.id, undefined);
-    else if (typeof input.apiKey === 'string' && input.apiKey.trim()) await this.sync.saveCredential(channel.id, input.apiKey);
-    await this.sync.saveProfileFromLocal();
-    await this.chatBindings.reconcile();
     this.changeEmitter.fire();
     return channel;
   }

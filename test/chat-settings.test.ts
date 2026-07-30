@@ -119,16 +119,12 @@ describe('ChatBindingService', () => {
     expect(data.bindings).toEqual([]);
   });
 
-  it('在新电脑上识别由 VS Code 同步的 AI Manager 设置', async () => {
+  it('不认领缺少绑定记录的用户设置', async () => {
     const { data, storage } = createStorage();
     mocks.globals.set('chat.utilityModel', 'ai-manager/provider-1');
     await new ChatBindingService(storage as any).reconcile();
-    expect(data.bindings).toEqual([{
-      setting: 'chat.utilityModel',
-      providerId: 'provider-1',
-      appliedValue: 'ai-manager/provider-1',
-      previousHadGlobalValue: false,
-    }]);
+    expect(mocks.globals.get('chat.utilityModel')).toBe('ai-manager/provider-1');
+    expect(data.bindings).toEqual([]);
   });
 
   it('限定名称设置在别名变化时全部同步更新且保留备份', async () => {

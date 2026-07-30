@@ -120,6 +120,19 @@ describe('SyncService', () => {
     });
   });
 
+  it('应用同步配置时使用新渠道地址更新模型标识', async () => {
+    const oldChannel = channel({ baseUrl: 'https://old.example.com' });
+    const newChannel = channel({ baseUrl: 'https://new.example.com' });
+    const target = createContext(new Map([
+      ['aiManager.channels', [oldChannel]],
+      ['aiManager.models', [model({ providerId: createModelProviderId(oldChannel, 'model-1') })]],
+      ['aiManager.sync.profile.v1', { version: 2, updatedAt: 1, channels: [newChannel], models: [] }],
+    ]));
+    const targetStorage = new StorageService(target.context as any);
+    await new SyncService(targetStorage).initialize();
+    expect(targetStorage.getModels()[0]?.providerId).toBe(createModelProviderId(newChannel, 'model-1'));
+  });
+
   it('修改主密码后旧密钥失效，重置时清除同步数据和本机凭据', async () => {
     const sync = new SyncService(storage);
     await sync.enable('correct horse battery staple');

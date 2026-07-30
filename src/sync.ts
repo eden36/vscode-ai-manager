@@ -217,8 +217,8 @@ export class SyncService {
     await this.enqueue(() => this.saveProfileFromLocalInternal());
   }
 
-  applyPreference(model: CatalogModel): CatalogModel {
-    const channel = this.storage.getChannels().find((item) => item.id === model.channelId);
+  applyPreference(model: CatalogModel, channels = this.storage.getChannels()): CatalogModel {
+    const channel = channels.find((item) => item.id === model.channelId);
     const preference = this.storage.getSyncProfile()?.models.find((item) => item.channelId === model.channelId && item.id === model.id);
     const protocol = preference?.metadataOverridden ? preference.protocol ?? model.protocol : model.protocol;
     const providerId = channel ? createModelProviderId(channel, model.id, protocol) : model.providerId;
@@ -263,7 +263,7 @@ export class SyncService {
       return { ...channel, ...(local?.lastRefreshAt === undefined ? {} : { lastRefreshAt: local.lastRefreshAt }), ...(local?.lastRefreshError === undefined ? {} : { lastRefreshError: local.lastRefreshError }) };
     });
     const channelIds = new Set(channels.map((channel) => channel.id));
-    const models = this.storage.getModels().filter((model) => channelIds.has(model.channelId)).map((model) => this.applyPreference(model));
+    const models = this.storage.getModels().filter((model) => channelIds.has(model.channelId)).map((model) => this.applyPreference(model, channels));
     await this.storage.saveChannels(channels);
     await this.storage.saveModels(models);
     this.lastAppliedProfileAt = profile.updatedAt;
