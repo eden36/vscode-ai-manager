@@ -4,6 +4,10 @@
 
 AI Manager 是一个 VS Code 桌面扩展，用于集中管理 OpenAI-compatible 渠道、动态模型目录和 VS Code 原生 Chat 模型绑定。
 
+## 开发初衷
+
+在 VS Code 中使用 AI 功能时，代码补全和 Git 提交信息生成等能力通常默认由 GitHub Copilot 提供；若想改用其他 AI 模型，往往需要手动调整多处配置。AI Manager 因此而生：它将不同 AI 模型的接入、管理和切换集中到一个界面中，让你能够更灵活地为不同场景选择合适的模型。
+
 需要 VS Code 1.121.0 或更高版本。
 
 ## 核心功能

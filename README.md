@@ -4,6 +4,10 @@
 
 AI Manager is a VS Code desktop extension for managing OpenAI-compatible channels, dynamic model catalogs, and native VS Code Chat model bindings from one place.
 
+## Why AI Manager
+
+In VS Code, AI features such as code completions and Git commit-message generation typically default to GitHub Copilot. Using another AI model often means manually changing settings in several places. AI Manager was built to bring model connections, management, and switching into one place, so you can choose the right model more freely for each workflow.
+
 Requires VS Code 1.121.0 or later.
 
 ## Highlights
