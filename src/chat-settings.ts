@@ -4,16 +4,29 @@ import type { StorageService } from './storage';
 import type { CatalogModel, ChannelConfig, ChatBindingRecord, ChatModelTarget, ChatSettingKey } from './types';
 
 export interface ChatSettingSelections {
+  chatDefault?: ChatModelTarget;
+  inlineChat?: ChatModelTarget;
+  implementAgent?: ChatModelTarget;
   utility?: ChatModelTarget;
   utilitySmall?: ChatModelTarget;
   planAgent?: ChatModelTarget;
 }
 
 const SETTING_ENTRIES: Array<{ field: keyof ChatSettingSelections; key: ChatSettingKey; label: string }> = [
+  { field: 'chatDefault', key: 'chat.defaultModel', label: 'Chat 默认模型' },
+  { field: 'inlineChat', key: 'inlineChat.defaultModel', label: 'Inline Chat 默认模型' },
+  { field: 'planAgent', key: 'chat.planAgent.defaultModel', label: 'Plan Agent 默认模型' },
+  { field: 'implementAgent', key: 'github.copilot.chat.implementAgent.model', label: 'Plan 实现阶段模型' },
   { field: 'utility', key: 'chat.utilityModel', label: 'Chat: Utility Model' },
   { field: 'utilitySmall', key: 'chat.utilitySmallModel', label: 'Chat: Utility Small Model' },
-  { field: 'planAgent', key: 'chat.planAgent.defaultModel', label: 'Chat: Plan Agent Default Model' },
 ];
+
+const QUALIFIED_MODEL_SETTINGS = new Set<ChatSettingKey>([
+  'chat.defaultModel',
+  'inlineChat.defaultModel',
+  'chat.planAgent.defaultModel',
+  'github.copilot.chat.implementAgent.model',
+]);
 
 export class ChatBindingService {
   private operationQueue: Promise<void> = Promise.resolve();
@@ -177,7 +190,7 @@ export class ChatBindingService {
   }
 
   private settingValue(setting: ChatSettingKey, channel: ChannelConfig, model: CatalogModel): string {
-    return setting === 'chat.planAgent.defaultModel'
+    return QUALIFIED_MODEL_SETTINGS.has(setting)
       ? `${getModelDisplayName(model, channel)} (ai-manager)`
       : `ai-manager/${model.providerId}`;
   }
@@ -186,16 +199,17 @@ export class ChatBindingService {
     configuration: vscode.WorkspaceConfiguration,
     setting: ChatSettingKey,
     value: unknown,
-    openPlanSettingOnFailure = true,
+    openSettingOnFailure = true,
   ): Promise<void> {
     try {
       await configuration.update(setting, value, vscode.ConfigurationTarget.Global);
       const stored = configuration.inspect(setting)?.globalValue;
       if (!Object.is(stored, value)) throw new Error('设置写入后未生效');
     } catch (error) {
-      if (setting === 'chat.planAgent.defaultModel' && openPlanSettingOnFailure) {
+      if (QUALIFIED_MODEL_SETTINGS.has(setting) && openSettingOnFailure) {
         void vscode.commands.executeCommand('workbench.action.openSettings', `@id:${setting}`);
-        throw new Error('VS Code 未接受 Plan Agent 动态模型值，已打开对应设置供你核对', { cause: error });
+        const label = SETTING_ENTRIES.find((entry) => entry.key === setting)?.label ?? setting;
+        throw new Error(`VS Code 无法应用“${label}”模型值，可能是当前版本不支持或组织策略已锁定；已打开对应设置供你核对`, { cause: error });
       }
       throw error;
     }

@@ -8,7 +8,7 @@ AI Manager 是一个 VS Code 桌面扩展，用于统一管理 OpenAI-compatible
 - 从 `/models` 刷新目录并保留上次成功缓存。
 - 在模型列表中设置别名和启用状态；默认别名为“渠道名： 模型名”。
 - 将启用的可用模型注册到 VS Code 原生 Chat 模型选择器。
-- 分别通过“渠道 → 模型”联动选择 Utility、Utility Small 和 Plan Agent 模型。
+- 分别通过“渠道 → 模型”联动选择主 Chat、Inline Chat、Plan、Plan 实现阶段、Utility 和 Utility Small 模型。
 - 支持搜索和筛选模型，并延迟渲染折叠的模型列表。
 - 绑定模型失效时安全恢复绑定前的用户级 Chat 设置，也可以主动解除绑定。
 - API Key 使用 VS Code `SecretStorage` 保存，不写入配置、缓存或日志。
@@ -22,6 +22,8 @@ AI Manager 是一个 VS Code 桌面扩展，用于统一管理 OpenAI-compatible
 在新电脑上登录同一 VS Code 账号并启用 Settings Sync 后，AI Manager 会恢复渠道和模型偏好，并提示输入一次同步主密码。忘记主密码时只能重置保险库；重置会清除同步密文和本机 API Key，无法恢复旧密钥。
 
 扩展只调用 OpenAI Chat Completions。新发现模型默认不启用；OpenCode Go 的目录不提供协议元数据，扩展会标记已知的 Messages 模型，也可以在模型详情中手动修正协议和能力。
+
+主 Chat 默认模型只作用于新建会话，当前会话中手动选择的模型不会被覆盖。Plan 实现阶段模型是 VS Code 实验性设置，可能因 VS Code 版本或组织策略而不可用。上述设置保存在当前 Profile 的用户设置中，并由 VS Code Settings Sync 按其设置同步规则处理。
 
 ## 开发
 

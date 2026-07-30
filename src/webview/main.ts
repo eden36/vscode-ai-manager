@@ -1,4 +1,5 @@
 import type { CatalogModel, ChannelConfig, ChatModelTarget, ChatSettingKey, DashboardState } from '../types';
+import type { ChatSettingSelections } from '../chat-settings';
 
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void };
 
@@ -348,10 +349,13 @@ function numericLabel(text: string, current: number, min: number): { label: HTML
   return { label, input };
 }
 
-const chatRows: Array<{ prefix: string; key: ChatSettingKey; field: 'utility' | 'utilitySmall' | 'planAgent' }> = [
+const chatRows: Array<{ prefix: string; key: ChatSettingKey; field: keyof ChatSettingSelections }> = [
+  { prefix: 'chat-default', key: 'chat.defaultModel', field: 'chatDefault' },
+  { prefix: 'inline-chat', key: 'inlineChat.defaultModel', field: 'inlineChat' },
+  { prefix: 'plan-agent', key: 'chat.planAgent.defaultModel', field: 'planAgent' },
+  { prefix: 'implement-agent', key: 'github.copilot.chat.implementAgent.model', field: 'implementAgent' },
   { prefix: 'utility', key: 'chat.utilityModel', field: 'utility' },
   { prefix: 'utility-small', key: 'chat.utilitySmallModel', field: 'utilitySmall' },
-  { prefix: 'plan-agent', key: 'chat.planAgent.defaultModel', field: 'planAgent' },
 ];
 
 for (const row of chatRows) {

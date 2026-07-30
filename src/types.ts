@@ -1,6 +1,12 @@
 export type ChannelPreset = 'custom' | 'opencode-go' | 'opencode-console';
 export type ModelProtocol = 'openai' | 'anthropic' | 'gemini' | 'unknown';
-export type ChatSettingKey = 'chat.utilityModel' | 'chat.utilitySmallModel' | 'chat.planAgent.defaultModel';
+export type ChatSettingKey =
+  | 'chat.defaultModel'
+  | 'inlineChat.defaultModel'
+  | 'chat.planAgent.defaultModel'
+  | 'github.copilot.chat.implementAgent.model'
+  | 'chat.utilityModel'
+  | 'chat.utilitySmallModel';
 
 export interface ChannelConfig {
   id: string;

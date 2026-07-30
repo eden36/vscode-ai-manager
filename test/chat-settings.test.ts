@@ -28,6 +28,7 @@ vi.mock('vscode', () => ({
 }));
 
 import { ChatBindingService } from '../src/chat-settings';
+import type { ChatSettingKey } from '../src/types';
 import { channel, model } from './fixtures';
 
 function createStorage() {
@@ -55,6 +56,26 @@ beforeEach(() => {
 });
 
 describe('ChatBindingService', () => {
+  it('为六类 Chat 设置写入对应格式的模型值', async () => {
+    const { storage } = createStorage();
+    await new ChatBindingService(storage as any).apply({
+      chatDefault: { channelId: 'channel-1', modelId: 'model-1' },
+      inlineChat: { channelId: 'channel-1', modelId: 'model-1' },
+      planAgent: { channelId: 'channel-1', modelId: 'model-1' },
+      implementAgent: { channelId: 'channel-1', modelId: 'model-1' },
+      utility: { channelId: 'channel-1', modelId: 'model-1' },
+      utilitySmall: { channelId: 'channel-1', modelId: 'model-1' },
+    });
+
+    const qualifiedName = '测试渠道： Model 1 (ai-manager)';
+    expect(mocks.globals.get('chat.defaultModel')).toBe(qualifiedName);
+    expect(mocks.globals.get('inlineChat.defaultModel')).toBe(qualifiedName);
+    expect(mocks.globals.get('chat.planAgent.defaultModel')).toBe(qualifiedName);
+    expect(mocks.globals.get('github.copilot.chat.implementAgent.model')).toBe(qualifiedName);
+    expect(mocks.globals.get('chat.utilityModel')).toBe('ai-manager/provider-1');
+    expect(mocks.globals.get('chat.utilitySmallModel')).toBe('ai-manager/provider-1');
+  });
+
   it('只修改已选择项目并保存绑定前的全局值', async () => {
     const { data, storage } = createStorage();
     mocks.globals.set('chat.utilityModel', 'copilot/original');
@@ -110,15 +131,24 @@ describe('ChatBindingService', () => {
     }]);
   });
 
-  it('Plan Agent 别名变化时同步更新且保留备份', async () => {
+  it('限定名称设置在别名变化时全部同步更新且保留备份', async () => {
     const { data, storage } = createStorage();
     mocks.globals.set('chat.planAgent.defaultModel', 'Auto (Vendor Default)');
     const service = new ChatBindingService(storage as any);
-    await service.apply({ planAgent: { channelId: 'channel-1', modelId: 'model-1' } });
+    await service.apply({
+      chatDefault: { channelId: 'channel-1', modelId: 'model-1' },
+      inlineChat: { channelId: 'channel-1', modelId: 'model-1' },
+      planAgent: { channelId: 'channel-1', modelId: 'model-1' },
+      implementAgent: { channelId: 'channel-1', modelId: 'model-1' },
+    });
     data.models[0]!.customAlias = '新别名';
     await service.reconcile();
+    expect(mocks.globals.get('chat.defaultModel')).toBe('新别名 (ai-manager)');
+    expect(mocks.globals.get('inlineChat.defaultModel')).toBe('新别名 (ai-manager)');
     expect(mocks.globals.get('chat.planAgent.defaultModel')).toBe('新别名 (ai-manager)');
-    expect(data.bindings[0]).toMatchObject({ previousGlobalValue: 'Auto (Vendor Default)' });
+    expect(mocks.globals.get('github.copilot.chat.implementAgent.model')).toBe('新别名 (ai-manager)');
+    expect(data.bindings.find((binding) => binding.setting === 'chat.planAgent.defaultModel'))
+      .toMatchObject({ previousGlobalValue: 'Auto (Vendor Default)' });
   });
 
   it('允许主动恢复绑定前设置', async () => {
@@ -128,6 +158,34 @@ describe('ChatBindingService', () => {
     await service.apply({ utility: { channelId: 'channel-1', modelId: 'model-1' } });
     await service.restore('chat.utilityModel');
     expect(mocks.globals.get('chat.utilityModel')).toBe('copilot/original');
+    expect(data.bindings).toEqual([]);
+  });
+
+  it('六类 Chat 设置都能恢复应用前的值', async () => {
+    const { data, storage } = createStorage();
+    const selections = {
+      chatDefault: { channelId: 'channel-1', modelId: 'model-1' },
+      inlineChat: { channelId: 'channel-1', modelId: 'model-1' },
+      planAgent: { channelId: 'channel-1', modelId: 'model-1' },
+      implementAgent: { channelId: 'channel-1', modelId: 'model-1' },
+      utility: { channelId: 'channel-1', modelId: 'model-1' },
+      utilitySmall: { channelId: 'channel-1', modelId: 'model-1' },
+    };
+    const previousValues = new Map([
+      ['chat.defaultModel', 'auto'],
+      ['inlineChat.defaultModel', 'Default'],
+      ['chat.planAgent.defaultModel', 'Auto (Vendor Default)'],
+      ['github.copilot.chat.implementAgent.model', ''],
+      ['chat.utilityModel', 'copilot/utility'],
+      ['chat.utilitySmallModel', 'copilot/small'],
+    ]);
+    for (const [key, previousValue] of previousValues) mocks.globals.set(key, previousValue);
+
+    const service = new ChatBindingService(storage as any);
+    await service.apply(selections);
+    for (const key of previousValues.keys()) await service.restore(key as ChatSettingKey);
+
+    for (const [key, previousValue] of previousValues) expect(mocks.globals.get(key)).toBe(previousValue);
     expect(data.bindings).toEqual([]);
   });
 
@@ -149,9 +207,20 @@ describe('ChatBindingService', () => {
     mocks.globals.set('chat.planAgent.defaultModel', 'Auto (Vendor Default)');
     mocks.failSetting = 'chat.planAgent.defaultModel';
     await expect(new ChatBindingService(storage as any).apply({ planAgent: { channelId: 'channel-1', modelId: 'model-1' } }))
-      .rejects.toThrow('VS Code 未接受 Plan Agent 动态模型值');
+      .rejects.toThrow('VS Code 无法应用“Plan Agent 默认模型”模型值');
     expect(mocks.globals.get('chat.planAgent.defaultModel')).toBe('Auto (Vendor Default)');
     expect(data.bindings).toEqual([]);
     expect(mocks.openedSettings).toEqual(['@id:chat.planAgent.defaultModel']);
+  });
+
+  it('主 Chat 默认模型写入失败时回滚并打开对应设置', async () => {
+    const { data, storage } = createStorage();
+    mocks.globals.set('chat.defaultModel', 'auto');
+    mocks.failSetting = 'chat.defaultModel';
+    await expect(new ChatBindingService(storage as any).apply({ chatDefault: { channelId: 'channel-1', modelId: 'model-1' } }))
+      .rejects.toThrow('当前版本不支持或组织策略已锁定');
+    expect(mocks.globals.get('chat.defaultModel')).toBe('auto');
+    expect(data.bindings).toEqual([]);
+    expect(mocks.openedSettings).toEqual(['@id:chat.defaultModel']);
   });
 });

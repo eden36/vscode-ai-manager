@@ -175,9 +175,12 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
     <section id="chat" class="page" aria-labelledby="chat-heading">
       <h1 id="chat-heading">Chat 绑定</h1>
       <form id="chat-form" class="card form-card">
+        ${chatBindingRow('chat-default', 'Chat 默认模型', '用于新建主 Chat 和 Agent 会话；当前会话中手动选择的模型不会被覆盖。')}
+        ${chatBindingRow('inline-chat', 'Inline Chat 默认模型', '用于在编辑器中通过 Ctrl+I 打开的就地聊天。')}
+        ${chatBindingRow('plan-agent', 'Plan Agent 默认模型', '用于 Plan Agent 制定和调整实施计划时的默认模型。')}
+        ${chatBindingRow('implement-agent', 'Plan 实现阶段模型（实验性）', '用于 Plan 完成后进入实现阶段时的模型；是否可用取决于当前 VS Code 版本。')}
         ${chatBindingRow('utility', 'Chat: Utility Model', '用于 Chat 的通用辅助任务，例如整理上下文和生成辅助内容。')}
         ${chatBindingRow('utility-small', 'Chat: Utility Small Model', '用于更轻量、强调响应速度的 Chat 辅助任务。')}
-        ${chatBindingRow('plan-agent', 'Chat: Plan Agent Default Model', '用于 Plan Agent 制定和调整实施计划时的默认模型。')}
         <p class="muted">保持原设置的项目不会被修改。所选模型失效时会恢复首次绑定前的用户级设置。</p>
         <button type="submit" class="primary">应用设置</button>
       </form>
