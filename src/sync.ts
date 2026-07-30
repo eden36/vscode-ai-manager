@@ -1,10 +1,10 @@
 import { createCipheriv, createDecipheriv, pbkdf2, randomBytes } from 'node:crypto';
 import type { CatalogModel, ChannelConfig, SyncStatus } from './types';
 import type { StorageService } from './storage';
-import { createModelProviderId } from './models';
+import { createModelProviderId, getProtocolPath } from './models';
 
 const VAULT_VERSION = 1;
-const PROFILE_VERSION = 1;
+const PROFILE_VERSION = 2;
 const PBKDF2_ITERATIONS = 600_000;
 const KEY_LENGTH = 32;
 const AAD = Buffer.from('ai-manager:v1', 'utf8');
@@ -24,7 +24,7 @@ export interface SyncedModelPreference {
 }
 
 export interface SyncProfile {
-  version: 1;
+  version: 1 | 2;
   updatedAt: number;
   channels: SyncedChannelConfig[];
   models: SyncedModelPreference[];
@@ -219,15 +219,15 @@ export class SyncService {
 
   applyPreference(model: CatalogModel): CatalogModel {
     const channel = this.storage.getChannels().find((item) => item.id === model.channelId);
-    const providerId = channel ? createModelProviderId(channel, model.id) : model.providerId;
     const preference = this.storage.getSyncProfile()?.models.find((item) => item.channelId === model.channelId && item.id === model.id);
+    const protocol = preference?.metadataOverridden ? preference.protocol ?? model.protocol : model.protocol;
+    const providerId = channel ? createModelProviderId(channel, model.id, protocol) : model.providerId;
     if (!preference) return { ...model, providerId };
-    const protocol = preference.metadataOverridden ? preference.protocol ?? model.protocol : model.protocol;
     return {
       ...model,
       providerId,
       customAlias: preference.customAlias,
-      enabled: protocol === 'openai' && preference.enabled,
+      enabled: Boolean(channel && getProtocolPath(channel, protocol) && preference.enabled),
       ...(preference.metadataOverridden ? {
         protocol,
         maxInputTokens: preference.maxInputTokens ?? model.maxInputTokens,
@@ -256,7 +256,7 @@ export class SyncService {
 
   private async applySyncedProfile(): Promise<void> {
     const profile = this.storage.getSyncProfile();
-    if (!profile || profile.version !== PROFILE_VERSION || profile.updatedAt === this.lastAppliedProfileAt) return;
+    if (!profile || (profile.version !== 1 && profile.version !== PROFILE_VERSION) || profile.updatedAt === this.lastAppliedProfileAt) return;
     const localChannels = new Map(this.storage.getChannels().map((channel) => [channel.id, channel]));
     const channels = profile.channels.map((channel) => {
       const local = localChannels.get(channel.id);
@@ -354,6 +354,10 @@ function toSyncedChannel(channel: ChannelConfig): SyncedChannelConfig {
     baseUrl: channel.baseUrl,
     modelsPath: channel.modelsPath,
     chatPath: channel.chatPath,
+    anthropicPath: channel.anthropicPath,
+    geminiPath: channel.geminiPath,
+    defaultProtocol: channel.defaultProtocol,
+    authMode: channel.authMode,
     enabled: channel.enabled,
     timeoutMs: channel.timeoutMs,
     refreshIntervalMinutes: channel.refreshIntervalMinutes,

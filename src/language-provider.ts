@@ -1,12 +1,14 @@
 import * as vscode from 'vscode';
 import { OpenAIClient } from './openai-client';
+import { AnthropicClient } from './anthropic-client';
+import { GeminiClient } from './gemini-client';
 import { estimateTokens, getExposedModels, getModelDisplayName, isModelUsable } from './models';
 import type { AppService } from './app-service';
 
 export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvider, vscode.Disposable {
   private readonly modelChangeEmitter = new vscode.EventEmitter<void>();
   readonly onDidChangeLanguageModelChatInformation = this.modelChangeEmitter.event;
-  private readonly client = new OpenAIClient();
+  private readonly clients = { openai: new OpenAIClient(), anthropic: new AnthropicClient(), gemini: new GeminiClient() };
   private readonly changeSubscription: vscode.Disposable;
 
   constructor(
@@ -53,7 +55,8 @@ export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvid
     const startedAt = Date.now();
     try {
       const apiKey = await this.app.storage.getApiKey(channel.id);
-      const result = await this.client.streamChat({ channel, model }, apiKey, messages, options, progress, token);
+      if (model.protocol === 'unknown') throw new Error('模型协议不受支持');
+      const result = await this.clients[model.protocol].streamChat({ channel, model }, apiKey, messages, options, progress, token);
       this.log(getModelDisplayName(model, channel), channel.name, model.id, Date.now() - startedAt, result.streamed ? 'success' : 'empty-response');
     } catch (error) {
       const category = error instanceof Error && 'category' in error ? String(error.category) : 'unknown';

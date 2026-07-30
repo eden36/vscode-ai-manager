@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto';
-import type { CatalogModel, ChannelConfig } from './types';
+import type { CatalogModel, ChannelConfig, ModelProtocol } from './types';
 
-export function createModelProviderId(channel: ChannelConfig, modelId: string): string {
+export function createModelProviderId(channel: ChannelConfig, modelId: string, protocol: ModelProtocol = 'openai'): string {
   const baseUrl = new URL(channel.baseUrl).toString().replace(/\/+$/, '');
   const modelsPath = `/${channel.modelsPath.replace(/^\/+/, '')}`;
   const chatPath = `/${channel.chatPath.replace(/^\/+/, '')}`;
-  const bytes = createHash('sha256').update(`ai-manager:model:v1\0${baseUrl}\0${modelsPath}\0${chatPath}\0${modelId}`, 'utf8').digest().subarray(0, 16);
+  const identity = protocol === 'openai'
+    ? `ai-manager:model:v1\0${baseUrl}\0${modelsPath}\0${chatPath}\0${modelId}`
+    : `ai-manager:model:v2\0${baseUrl}\0${modelsPath}\0${protocol}\0${getProtocolPath(channel, protocol) ?? ''}\0${modelId}`;
+  const bytes = createHash('sha256').update(identity, 'utf8').digest().subarray(0, 16);
   bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
   bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
   const hex = bytes.toString('hex');
@@ -17,7 +20,14 @@ export function getModelDisplayName(model: CatalogModel, channel: ChannelConfig)
 }
 
 export function isModelUsable(model: CatalogModel, channel: ChannelConfig | undefined): boolean {
-  return Boolean(channel?.enabled && model.enabled && model.available && model.protocol === 'openai');
+  return Boolean(channel?.enabled && model.enabled && model.available && channel && getProtocolPath(channel, model.protocol));
+}
+
+export function getProtocolPath(channel: ChannelConfig, protocol: ModelProtocol): string | undefined {
+  if (protocol === 'openai') return channel.chatPath;
+  if (protocol === 'anthropic') return channel.anthropicPath;
+  if (protocol === 'gemini') return channel.geminiPath?.includes('{model}') ? channel.geminiPath : undefined;
+  return undefined;
 }
 
 export function sortCatalogModels(models: readonly CatalogModel[]): CatalogModel[] {

@@ -1,5 +1,6 @@
 export type ChannelPreset = 'custom' | 'opencode-go' | 'opencode-console';
 export type ModelProtocol = 'openai' | 'anthropic' | 'gemini' | 'unknown';
+export type ChannelAuthMode = 'bearer' | 'anthropic-api-key' | 'google-api-key';
 export type ChatSettingKey =
   | 'chat.defaultModel'
   | 'inlineChat.defaultModel'
@@ -15,6 +16,10 @@ export interface ChannelConfig {
   baseUrl: string;
   modelsPath: string;
   chatPath: string;
+  anthropicPath?: string;
+  geminiPath?: string;
+  defaultProtocol: Exclude<ModelProtocol, 'unknown'>;
+  authMode: ChannelAuthMode;
   enabled: boolean;
   timeoutMs: number;
   refreshIntervalMinutes: number;

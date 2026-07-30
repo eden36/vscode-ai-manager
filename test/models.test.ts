@@ -9,6 +9,8 @@ describe('模型显示与排序', () => {
     expect(createModelProviderId(first, 'gpt-test')).toBe(createModelProviderId(second, 'gpt-test'));
     expect(createModelProviderId(first, 'gpt-test')).not.toBe(createModelProviderId(first, 'other-model'));
     expect(createModelProviderId(first, 'gpt-test')).not.toBe(createModelProviderId(channel({ baseUrl: 'https://other.example.com' }), 'gpt-test'));
+    expect(createModelProviderId(first, 'claude-test', 'anthropic')).toBe(createModelProviderId(second, 'claude-test', 'anthropic'));
+    expect(createModelProviderId(first, 'claude-test', 'anthropic')).not.toBe(createModelProviderId(first, 'claude-test', 'gemini'));
   });
 
   it('使用自定义别名或渠道名加模型名作为默认值', () => {
@@ -25,14 +27,14 @@ describe('模型显示与排序', () => {
     expect(sorted.map((item) => item.id)).toEqual(['disabled-first', 'enabled-second', 'enabled-third']);
   });
 
-  it('只暴露渠道与模型均启用且可用的 OpenAI 模型', () => {
+  it('暴露渠道与模型均启用、可用且已配置协议端点的模型', () => {
     const exposed = getExposedModels([channel()], [
       model(),
       model({ id: 'disabled', enabled: false }),
       model({ id: 'missing', available: false }),
       model({ id: 'anthropic', protocol: 'anthropic' }),
     ]);
-    expect(exposed.map((item) => item.id)).toEqual(['model-1']);
+    expect(exposed.map((item) => item.id)).toEqual(['model-1', 'anthropic']);
   });
 });
 

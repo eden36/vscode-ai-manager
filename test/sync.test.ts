@@ -77,6 +77,7 @@ describe('SyncService', () => {
 
     expect(source.syncKeys).toEqual(['aiManager.sync.profile.v1', 'aiManager.sync.vault.v1']);
     const profile = storage.getSyncProfile()!;
+    expect(profile.version).toBe(2);
     expect(profile.channels[0]).not.toHaveProperty('lastRefreshAt');
     expect(profile.channels[0]).not.toHaveProperty('lastRefreshError');
     expect(profile.models[0]).toMatchObject({ customAlias: '同步别名', enabled: true, maxInputTokens: 64_000 });
@@ -96,6 +97,27 @@ describe('SyncService', () => {
     expect(await targetStorage.getApiKey('channel-1')).toBe('top-secret');
     expect(targetSync.applyPreference(model({ providerId: 'new-provider', customAlias: undefined, enabled: false })))
       .toMatchObject({ providerId: createModelProviderId(channel(), 'model-1'), customAlias: '同步别名', enabled: true, maxInputTokens: 64_000 });
+  });
+
+  it('将版本 1 渠道配置迁移为多协议默认值', async () => {
+    const legacyChannel: any = channel({ preset: 'opencode-go' });
+    delete legacyChannel.defaultProtocol;
+    delete legacyChannel.authMode;
+    delete legacyChannel.anthropicPath;
+    delete legacyChannel.geminiPath;
+    const target = createContext(new Map([['aiManager.sync.profile.v1', {
+      version: 1,
+      updatedAt: 1,
+      channels: [legacyChannel],
+      models: [],
+    }]]));
+    const targetStorage = new StorageService(target.context as any);
+    await new SyncService(targetStorage).initialize();
+    expect(targetStorage.getChannels()[0]).toMatchObject({
+      defaultProtocol: 'openai',
+      authMode: 'bearer',
+      anthropicPath: '/zen/go/v1/messages',
+    });
   });
 
   it('修改主密码后旧密钥失效，重置时清除同步数据和本机凭据', async () => {

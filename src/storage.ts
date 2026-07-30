@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { normalizeChannel } from './presets';
 import type { EncryptedVault, SyncProfile } from './sync';
 import type { CatalogModel, ChannelConfig, ChatBindingRecord } from './types';
 
@@ -19,7 +20,7 @@ export class StorageService {
   }
 
   getChannels(): ChannelConfig[] {
-    return this.context.globalState.get<ChannelConfig[]>(CHANNELS_KEY, []);
+    return this.context.globalState.get<ChannelConfig[]>(CHANNELS_KEY, []).map(normalizeChannel);
   }
 
   getModels(): CatalogModel[] {

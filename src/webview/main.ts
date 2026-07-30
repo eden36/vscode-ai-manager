@@ -141,7 +141,9 @@ function renderChannelModels(channel: ChannelConfig): HTMLElement {
       || filter === 'available' && model.available
       || filter === 'unavailable' && !model.available
       || filter === 'openai' && model.protocol === 'openai'
-      || filter === 'unsupported' && model.protocol !== 'openai';
+      || filter === 'anthropic' && model.protocol === 'anthropic'
+      || filter === 'gemini' && model.protocol === 'gemini'
+      || filter === 'unsupported' && !protocolConfigured(channel, model.protocol);
     return matchesQuery && matchesFilter;
   });
   const summary = document.createElement('summary');
@@ -184,7 +186,7 @@ function renderModelRow(channel: ChannelConfig, model: CatalogModel): HTMLElemen
   const enabled = document.createElement('input');
   enabled.type = 'checkbox';
   enabled.checked = model.enabled;
-  enabled.disabled = !channel.enabled || !model.available || model.protocol !== 'openai';
+  enabled.disabled = !channel.enabled || !model.available || !protocolConfigured(channel, model.protocol);
   enabled.addEventListener('change', () => send('saveModel', { channelId: model.channelId, id: model.id, enabled: enabled.checked }));
   enabledLabel.append(enabled, document.createTextNode('启用'));
   const alias = document.createElement('input');
@@ -227,6 +229,7 @@ function openChannelForm(channel?: ChannelConfig & { hasCredential?: boolean }):
   byId('channel-form-title').textContent = channel ? '编辑渠道' : '新增渠道';
   const defaults = channel ?? {
     id: '', name: '', preset: 'custom', baseUrl: '', modelsPath: '/v1/models', chatPath: '/v1/chat/completions',
+    anthropicPath: '/v1/messages', geminiPath: '/v1beta/models/{model}:streamGenerateContent?alt=sse', defaultProtocol: 'openai', authMode: 'bearer',
     timeoutMs: 15000, refreshIntervalMinutes: 360, defaultMaxInputTokens: 128000, defaultMaxOutputTokens: 8192, enabled: true,
   };
   byId<HTMLInputElement>('channel-id').value = defaults.id;
@@ -235,6 +238,10 @@ function openChannelForm(channel?: ChannelConfig & { hasCredential?: boolean }):
   byId<HTMLInputElement>('channel-base-url').value = defaults.baseUrl;
   byId<HTMLInputElement>('channel-models-path').value = defaults.modelsPath;
   byId<HTMLInputElement>('channel-chat-path').value = defaults.chatPath;
+  byId<HTMLInputElement>('channel-anthropic-path').value = defaults.anthropicPath ?? '';
+  byId<HTMLInputElement>('channel-gemini-path').value = defaults.geminiPath ?? '';
+  byId<HTMLSelectElement>('channel-default-protocol').value = defaults.defaultProtocol;
+  byId<HTMLSelectElement>('channel-auth-mode').value = defaults.authMode;
   byId<HTMLInputElement>('channel-api-key').value = '';
   byId<HTMLInputElement>('channel-api-key').disabled = false;
   byId<HTMLInputElement>('channel-api-key').placeholder = channel ? '留空表示不修改' : '可选';
@@ -265,15 +272,19 @@ byId<HTMLInputElement>('channel-clear-api-key').addEventListener('change', (even
   if (clear) apiKey.value = '';
 });
 byId<HTMLSelectElement>('channel-preset').addEventListener('change', (event) => {
-  const values: Record<string, [string, string, string]> = {
-    custom: ['', '/v1/models', '/v1/chat/completions'],
-    'opencode-go': ['https://opencode.ai', '/zen/go/v1/models', '/zen/go/v1/chat/completions'],
-    'opencode-console': ['https://console.opencode.ai', '/inference/openai/v1/models', '/inference/openai/v1/chat/completions'],
+  const values: Record<string, [string, string, string, string, string]> = {
+    custom: ['', '/v1/models', '/v1/chat/completions', '/v1/messages', '/v1beta/models/{model}:streamGenerateContent?alt=sse'],
+    'opencode-go': ['https://opencode.ai', '/zen/go/v1/models', '/zen/go/v1/chat/completions', '/zen/go/v1/messages', ''],
+    'opencode-console': ['https://console.opencode.ai', '/inference/openai/v1/models', '/inference/openai/v1/chat/completions', '', ''],
   };
   const selected = values[(event.target as HTMLSelectElement).value] ?? values.custom!;
   byId<HTMLInputElement>('channel-base-url').value = selected[0];
   byId<HTMLInputElement>('channel-models-path').value = selected[1];
   byId<HTMLInputElement>('channel-chat-path').value = selected[2];
+  byId<HTMLInputElement>('channel-anthropic-path').value = selected[3];
+  byId<HTMLInputElement>('channel-gemini-path').value = selected[4];
+  byId<HTMLSelectElement>('channel-default-protocol').value = 'openai';
+  byId<HTMLSelectElement>('channel-auth-mode').value = 'bearer';
 });
 byId<HTMLFormElement>('channel-form').addEventListener('submit', (event) => {
   event.preventDefault();
@@ -285,6 +296,10 @@ byId<HTMLFormElement>('channel-form').addEventListener('submit', (event) => {
     baseUrl: value('channel-base-url'),
     modelsPath: value('channel-models-path'),
     chatPath: value('channel-chat-path'),
+    anthropicPath: value('channel-anthropic-path'),
+    geminiPath: value('channel-gemini-path'),
+    defaultProtocol: value('channel-default-protocol'),
+    authMode: value('channel-auth-mode'),
     apiKey: value('channel-api-key'),
     clearApiKey: checked('channel-clear-api-key'),
     timeoutMs: numberValue('channel-timeout'),
@@ -401,7 +416,7 @@ function fillModelPicker(prefix: string, selectedModelId?: string): void {
 function eligibleModels(channelId: string): CatalogModel[] {
   if (!state.channels.some((channel) => channel.id === channelId && channel.enabled)) return [];
   return state.models
-    .filter((model) => model.channelId === channelId && model.enabled && model.available && model.protocol === 'openai')
+    .filter((model) => model.channelId === channelId && model.enabled && model.available && protocolConfigured(state.channels.find((channel) => channel.id === channelId)!, model.protocol))
     .sort((left, right) => left.catalogOrder - right.catalogOrder || left.name.localeCompare(right.name));
 }
 
@@ -475,6 +490,14 @@ function option(value: string, label: string): HTMLOptionElement {
 
 function defaultAlias(channel: ChannelConfig, model: CatalogModel): string {
   return `${channel.name}： ${model.name}`;
+}
+
+function protocolConfigured(channel: ChannelConfig | undefined, protocol: CatalogModel['protocol']): boolean {
+  if (!channel) return false;
+  if (protocol === 'openai') return Boolean(channel.chatPath);
+  if (protocol === 'anthropic') return Boolean(channel.anthropicPath);
+  if (protocol === 'gemini') return Boolean(channel.geminiPath?.includes('{model}'));
+  return false;
 }
 
 function formatTime(timestamp: number): string {

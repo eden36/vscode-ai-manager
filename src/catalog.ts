@@ -1,8 +1,9 @@
 import type { CatalogChange, CatalogModel, CatalogRefreshSummary, ChannelConfig, ModelProtocol } from './types';
 import { classifyHttpError, RequestError, safeErrorMessage } from './errors';
-import { createModelProviderId } from './models';
+import { createModelProviderId, getProtocolPath } from './models';
 import { StorageService } from './storage';
 import type { SyncService } from './sync';
+import { apiKeyHeaders } from './protocol-http';
 
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
@@ -25,7 +26,7 @@ export function inferProtocol(raw: Record<string, unknown>, channel?: ChannelCon
   if (explicit.includes('openai') || explicit.includes('chat-completions') || explicit.includes('chat/completions')) return 'openai';
   const modelId = typeof raw.id === 'string' ? raw.id.toLowerCase() : '';
   if (channel?.preset === 'opencode-go' && (/^minimax-/.test(modelId) || /^qwen3\.[5-9]/.test(modelId))) return 'anthropic';
-  return 'openai';
+  return channel?.defaultProtocol ?? 'openai';
 }
 
 export function parseModelCatalog(payload: unknown, channel: ChannelConfig, now = Date.now()): CatalogModel[] {
@@ -34,7 +35,9 @@ export function parseModelCatalog(payload: unknown, channel: ChannelConfig, now 
   const seen = new Set<string>();
   return items.flatMap((entry, catalogOrder) => {
     const raw = objectValue(entry);
-    const id = typeof raw.id === 'string' ? raw.id.trim() : typeof raw.name === 'string' ? raw.name.trim() : '';
+    const rawId = typeof raw.id === 'string' ? raw.id.trim() : typeof raw.name === 'string' ? raw.name.trim() : '';
+    const protocol = inferProtocol(raw, channel);
+    const id = protocol === 'gemini' ? rawId.replace(/^models\//, '') : rawId;
     if (!id || seen.has(id)) return [];
     seen.add(id);
     const limits = objectValue(raw.limits ?? raw.limit);
@@ -63,10 +66,10 @@ export function parseModelCatalog(payload: unknown, channel: ChannelConfig, now 
       channelId: channel.id,
       id,
       providerId: '',
-      name: typeof raw.name === 'string' ? raw.name : typeof raw.displayName === 'string' ? raw.displayName : id,
+      name: typeof raw.displayName === 'string' ? raw.displayName : typeof raw.name === 'string' ? raw.name.replace(/^models\//, '') : id,
       enabled: false,
       catalogOrder,
-      protocol: inferProtocol(raw, channel),
+      protocol,
       available: true,
       maxInputTokens,
       maxOutputTokens,
@@ -118,7 +121,7 @@ export class CatalogService {
     if (!channel) throw new Error('渠道不存在');
     try {
       const apiKey = await this.storage.getApiKey(channel.id);
-      const payload = await this.fetchJsonWithRetry(joinEndpoint(channel.baseUrl, channel.modelsPath), apiKey, channel.timeoutMs);
+      const payload = await this.fetchJsonWithRetry(joinEndpoint(channel.baseUrl, channel.modelsPath), apiKey, channel);
       if (!this.hasRecognizedCatalogShape(payload)) throw new Error('模型目录格式不受支持');
       const discovered = parseModelCatalog(payload, channel);
       let merged: CatalogModel[] = [];
@@ -137,9 +140,9 @@ export class CatalogService {
           const protocol = old?.metadataOverridden ? old.protocol : model.protocol;
           const stable = {
             ...model,
-            providerId: createModelProviderId(channel, model.id),
+            providerId: createModelProviderId(channel, model.id, protocol),
             customAlias: old?.customAlias,
-            enabled: protocol === 'openai' ? old?.enabled ?? false : false,
+            enabled: getProtocolPath(channel, protocol) ? old?.enabled ?? false : false,
           };
           const mergedModel = old?.metadataOverridden
             ? { ...stable, protocol: old.protocol, maxInputTokens: old.maxInputTokens, maxOutputTokens: old.maxOutputTokens, toolCalling: old.toolCalling, metadataOverridden: true }
@@ -168,14 +171,14 @@ export class CatalogService {
     }
   }
 
-  private async fetchJsonWithRetry(url: string, apiKey: string | undefined, timeoutMs: number): Promise<unknown> {
+  private async fetchJsonWithRetry(url: string, apiKey: string | undefined, channel: ChannelConfig): Promise<unknown> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const timer = setTimeout(() => controller.abort(), channel.timeoutMs);
       try {
         const response = await fetch(url, {
-          headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+          headers: apiKeyHeaders(channel, apiKey),
           signal: controller.signal,
         });
         if (!response.ok) throw classifyHttpError(response.status);

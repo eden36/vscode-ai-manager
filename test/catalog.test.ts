@@ -33,6 +33,12 @@ describe('parseModelCatalog', () => {
     expect(inferProtocol({ id: 'x', endpoint: '/v1/messages' })).toBe('anthropic');
   });
 
+  it('使用渠道默认协议并规范化 Gemini 模型名称', () => {
+    const geminiChannel = channel({ defaultProtocol: 'gemini', authMode: 'google-api-key' });
+    expect(parseModelCatalog({ models: [{ name: 'models/gemini-test', displayName: 'Gemini Test' }] }, geminiChannel)[0])
+      .toMatchObject({ id: 'gemini-test', name: 'Gemini Test', protocol: 'gemini' });
+  });
+
   it('忽略目录中的重复模型 ID', () => {
     const result = parseModelCatalog({ data: [{ id: 'same' }, { id: 'same' }, { id: 'other' }] }, channel());
     expect(result.map((item) => item.id)).toEqual(['same', 'other']);

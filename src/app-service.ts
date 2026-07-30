@@ -3,9 +3,10 @@ import * as vscode from 'vscode';
 import { joinEndpoint, CatalogService } from './catalog';
 import type { ChatBindingService } from './chat-settings';
 import { createChannelDefaults } from './presets';
+import { createModelProviderId, getProtocolPath } from './models';
 import { StorageService } from './storage';
 import type { SyncService } from './sync';
-import type { CatalogChange, CatalogModel, CatalogRefreshSummary, ChannelConfig, ChannelPreset, DashboardState, ModelProtocol } from './types';
+import type { CatalogChange, CatalogModel, CatalogRefreshSummary, ChannelAuthMode, ChannelConfig, ChannelPreset, DashboardState, ModelProtocol } from './types';
 
 interface SaveChannelInput extends Partial<ChannelConfig> {
   apiKey?: string;
@@ -65,6 +66,10 @@ export class AppService implements vscode.Disposable {
         baseUrl: this.requiredText(input.baseUrl ?? existing?.baseUrl ?? defaults.baseUrl, 'Base URL').replace(/\/+$/, ''),
         modelsPath: this.normalizedPath(input.modelsPath ?? existing?.modelsPath ?? defaults.modelsPath),
         chatPath: this.normalizedPath(input.chatPath ?? existing?.chatPath ?? defaults.chatPath),
+        anthropicPath: this.optionalPath(input.anthropicPath ?? existing?.anthropicPath ?? defaults.anthropicPath),
+        geminiPath: this.optionalPath(input.geminiPath ?? existing?.geminiPath ?? defaults.geminiPath),
+        defaultProtocol: this.parseDefaultProtocol(input.defaultProtocol ?? existing?.defaultProtocol ?? defaults.defaultProtocol),
+        authMode: this.parseAuthMode(input.authMode ?? existing?.authMode ?? defaults.authMode),
         enabled: input.enabled ?? existing?.enabled ?? true,
         timeoutMs: this.boundedInteger(input.timeoutMs ?? existing?.timeoutMs ?? defaults.timeoutMs, 1_000, 120_000, '超时时间'),
         refreshIntervalMinutes: this.boundedInteger(input.refreshIntervalMinutes ?? existing?.refreshIntervalMinutes ?? defaults.refreshIntervalMinutes, 5, 10_080, '刷新周期'),
@@ -73,6 +78,11 @@ export class AppService implements vscode.Disposable {
       };
       joinEndpoint(channel.baseUrl, channel.modelsPath);
       joinEndpoint(channel.baseUrl, channel.chatPath);
+      if (channel.anthropicPath) joinEndpoint(channel.baseUrl, channel.anthropicPath);
+      if (channel.geminiPath) {
+        if (!channel.geminiPath.includes('{model}')) throw new Error('Gemini 路径必须包含 {model} 占位符');
+        joinEndpoint(channel.baseUrl, channel.geminiPath.replace('{model}', 'test-model'));
+      }
       return existing ? channels.map((item) => item.id === channel!.id ? channel! : item) : [...channels, channel];
     });
     if (!channel) throw new Error('渠道保存失败');
@@ -133,8 +143,8 @@ export class AppService implements vscode.Disposable {
       const channel = this.storage.getChannels().find((item) => item.id === model.channelId);
       const protocol = input.protocol ?? model.protocol;
       let enabled = input.enabled ?? model.enabled;
-      if (enabled && (!channel?.enabled || !model.available || protocol !== 'openai')) throw new Error('当前模型不可启用');
-      if (protocol !== 'openai') enabled = false;
+      if (enabled && (!channel?.enabled || !model.available || !getProtocolPath(channel, protocol))) throw new Error('当前模型缺少可用的协议端点，无法启用');
+      if (!channel || !getProtocolPath(channel, protocol)) enabled = false;
       const customAlias = input.customAlias === undefined ? model.customAlias : input.customAlias.trim() || undefined;
       if (customAlias && customAlias.length > 80) throw new Error('模型别名不能超过 80 个字符');
       const metadataChanged = input.protocol !== undefined || input.maxInputTokens !== undefined || input.maxOutputTokens !== undefined || input.toolCalling !== undefined;
@@ -143,6 +153,7 @@ export class AppService implements vscode.Disposable {
         customAlias,
         enabled,
         protocol,
+        providerId: channel ? createModelProviderId(channel, model.id, protocol) : model.providerId,
         maxInputTokens: input.maxInputTokens === undefined ? model.maxInputTokens : this.boundedInteger(input.maxInputTokens, 1_024, 10_000_000, '输入上限'),
         maxOutputTokens: input.maxOutputTokens === undefined ? model.maxOutputTokens : this.boundedInteger(input.maxOutputTokens, 256, 1_000_000, '输出上限'),
         toolCalling: input.toolCalling ?? model.toolCalling,
@@ -196,6 +207,19 @@ export class AppService implements vscode.Disposable {
     const number = typeof value === 'number' ? value : Number(value);
     if (!Number.isInteger(number) || number < min || number > max) throw new Error(`${label}必须是 ${min} 到 ${max} 之间的整数`);
     return number;
+  }
+
+  private optionalPath(value: unknown): string | undefined {
+    if (value === undefined || value === null || value === '') return undefined;
+    return this.normalizedPath(value);
+  }
+
+  private parseDefaultProtocol(value: unknown): ChannelConfig['defaultProtocol'] {
+    return value === 'anthropic' || value === 'gemini' ? value : 'openai';
+  }
+
+  private parseAuthMode(value: unknown): ChannelAuthMode {
+    return value === 'anthropic-api-key' || value === 'google-api-key' ? value : 'bearer';
   }
 
   private assertMatchingPasswords(password: string, confirmation: string): void {

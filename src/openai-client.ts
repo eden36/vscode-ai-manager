@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { classifyHttpError, RequestError } from './errors';
 import { joinEndpoint } from './catalog';
 import type { ResolvedCandidate } from './types';
+import { apiKeyHeaders, createRequestControl } from './protocol-http';
 
 interface OpenAIMessage {
   role: 'user' | 'assistant' | 'tool';
@@ -62,18 +63,7 @@ export class OpenAIClient {
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken,
   ): Promise<StreamResult> {
-    const controller = new AbortController();
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    let timedOut = false;
-    const armTimeout = (): void => {
-      if (timeout) clearTimeout(timeout);
-      timeout = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, target.channel.timeoutMs);
-    };
-    armTimeout();
-    const cancellation = token.onCancellationRequested(() => controller.abort());
+    const request = createRequestControl(target.channel.timeoutMs, token);
     let streamed = false;
     let responseStarted = false;
     try {
@@ -86,7 +76,7 @@ export class OpenAIClient {
         headers: {
           'Content-Type': 'application/json',
           Accept: 'text/event-stream',
-          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+          ...apiKeyHeaders(target.channel, apiKey),
         },
         body: JSON.stringify({
           model: target.model.id,
@@ -97,9 +87,9 @@ export class OpenAIClient {
             tool_choice: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto',
           } : {}),
         }),
-        signal: controller.signal,
+        signal: request.controller.signal,
       });
-      armTimeout();
+      request.armTimeout();
       if (!response.ok) {
         if (response.status === 400) {
           const errorCode = await response.clone().json().then((payload: any) => String(payload?.error?.code ?? payload?.error?.type ?? '')).catch(() => '');
@@ -148,7 +138,7 @@ export class OpenAIClient {
       while (true) {
         const read = await reader.read();
         if (read.done) break;
-        armTimeout();
+        request.armTimeout();
         buffer += decoder.decode(read.value, { stream: true });
         const events = buffer.split(/\r?\n\r?\n/);
         buffer = events.pop() ?? '';
@@ -175,13 +165,12 @@ export class OpenAIClient {
           : error;
       }
       if (error instanceof Error && error.name === 'AbortError') {
-        if (token.isCancellationRequested && !timedOut) throw new RequestError('请求已取消', 'cancelled', undefined, false, responseStarted);
+        if (token.isCancellationRequested && !request.wasTimedOut()) throw new RequestError('请求已取消', 'cancelled', undefined, false, responseStarted);
         throw new RequestError('请求超时', 'timeout', undefined, true, responseStarted);
       }
       throw new RequestError('无法连接到渠道', 'network', undefined, true, responseStarted);
     } finally {
-      if (timeout) clearTimeout(timeout);
-      cancellation.dispose();
+      request.dispose();
     }
   }
 }
