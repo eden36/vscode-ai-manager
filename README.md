@@ -1,31 +1,71 @@
 # AI Manager
 
-AI Manager 是一个 VS Code 桌面扩展，用于统一管理 OpenAI、Anthropic 和 Gemini 渠道、动态模型目录和 Chat 模型绑定。
+**English** | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-## 当前功能
+AI Manager is a VS Code desktop extension for managing OpenAI-compatible channels, dynamic model catalogs, and native VS Code Chat model bindings from one place.
 
-- 内置 OpenCode Go、OpenCode Console 预设，也支持自定义 OpenAI-compatible 地址。
-- 从 `/models` 刷新目录并保留上次成功缓存。
-- 在模型列表中设置别名和启用状态；默认别名为“渠道名： 模型名”。
-- 将启用的可用模型注册到 VS Code 原生 Chat 模型选择器。
-- 分别通过“渠道 → 模型”联动选择主 Chat、Inline Chat、Plan、Plan 实现阶段、Utility 和 Utility Small 模型。
-- 支持搜索和筛选模型，并延迟渲染折叠的模型列表。
-- 绑定模型失效时安全恢复绑定前的用户级 Chat 设置，也可以主动解除绑定。
-- API Key 使用 VS Code `SecretStorage` 保存，不写入配置、缓存或日志。
-- 支持在渠道编辑界面单独清除已保存的 API Key。
-- 可通过 VS Code Settings Sync 跨设备同步渠道、模型偏好和加密后的 API Key。
+Requires VS Code 1.121.0 or later.
 
-## 跨设备同步
+## Highlights
 
-在“同步”页面创建同步主密码后，扩展会使用 PBKDF2-SHA256 和 AES-256-GCM 加密现有 API Key，并将密文与可移植配置交给 VS Code Settings Sync。同步主密码不能为空，但不限制长度；原始主密码不会保存，本机只在 `SecretStorage` 中保存派生密钥。
+- Manage OpenCode Go, OpenCode Console, and custom OpenAI-compatible channels.
+- Refresh model catalogs while keeping the last successful cache available.
+- Rename, filter, configure, and selectively enable discovered models.
+- Register enabled models in the native VS Code Chat model picker.
+- Bind separate models to Chat, Inline Chat, Plan, Plan implementation, Utility, and Utility Small settings.
+- Store API keys in VS Code `SecretStorage`, with optional encrypted synchronization through `Settings Sync`.
 
-在新电脑上登录同一 VS Code 账号并启用 Settings Sync 后，AI Manager 会恢复渠道和模型偏好，并提示输入一次同步主密码。忘记主密码时只能重置保险库；重置会清除同步密文和本机 API Key，无法恢复旧密钥。
+## Screenshots
 
-扩展支持 OpenAI Chat Completions、Anthropic Messages 和 Gemini `streamGenerateContent`。新发现模型默认不启用；OpenCode Go 会按模型自动选择 `/chat/completions` 或 `/messages`，也可以在模型详情中手动修正协议和能力。自定义渠道可分别配置三种协议端点和 Bearer、`x-api-key`、`x-goog-api-key` 认证方式；Gemini 路径必须包含 `{model}` 占位符。
+### Channel and model management
 
-主 Chat 默认模型只作用于新建会话，当前会话中手动选择的模型不会被覆盖。Plan 实现阶段模型是 VS Code 实验性设置，可能因 VS Code 版本或组织策略而不可用。上述设置保存在当前 Profile 的用户设置中，并由 VS Code Settings Sync 按其设置同步规则处理。
+![AI Manager channel and model management](docs/images/channel-management.png)
 
-## 开发
+### Chat model bindings
+
+![AI Manager Chat model bindings](docs/images/chat-bindings.png)
+
+## Quick Start
+
+1. Open **AI Manager** from the Activity Bar.
+2. Add a channel and enter its Base URL, endpoint paths, authentication mode, and optional API key.
+3. Refresh the channel to load its model catalog.
+4. Review the discovered models, adjust aliases or metadata when needed, and enable the models you want to use.
+5. Open the Chat settings page in AI Manager and assign a channel and model to each setting you want to manage.
+
+Newly discovered models are disabled by default.
+
+## Supported Protocols
+
+| Protocol | API | Typical endpoint |
+| --- | --- | --- |
+| OpenAI | Chat Completions | `/v1/chat/completions` |
+| Anthropic | Messages | `/v1/messages` |
+| Gemini | `streamGenerateContent` | `/v1beta/models/{model}:streamGenerateContent?alt=sse` |
+
+Custom channels can configure independent endpoints for all three protocols and use Bearer, `x-api-key`, or `x-goog-api-key` authentication. A Gemini endpoint must include the `{model}` placeholder.
+
+OpenCode Go automatically infers the protocol for known model families. You can override the protocol, token limits, and tool-calling capability from the model editor.
+
+## Cross-device Sync
+
+AI Manager can synchronize channels, model preferences, and encrypted API keys through VS Code `Settings Sync`.
+
+When sync is enabled, API keys are encrypted with PBKDF2-SHA256 and AES-256-GCM before entering synchronized storage. The master password is never saved; only the derived key is stored locally in `SecretStorage`.
+
+On another computer, sign in to the same VS Code account, enable `Settings Sync`, and unlock AI Manager once with the same master password. If the password is lost, the vault must be reset, which removes the synchronized ciphertext and local API keys.
+
+## Notes and Limitations
+
+- The main Chat default model applies to new conversations and does not replace a model manually selected in an existing conversation.
+- The Plan implementation model uses an experimental VS Code setting and may be unavailable because of the VS Code version or organization policy.
+- Disabled, unavailable, or unconfigured models are not exposed to the native model picker.
+
+## Privacy
+
+Request logs contain only the channel, alias, model ID, duration, HTTP status, and error category. AI Manager does not log prompts, responses, credentials, the sync master password, or derived keys, and it does not read local OpenCode authentication files.
+
+## Development
 
 ```powershell
 npm install
@@ -33,10 +73,4 @@ npm run check
 npm run package:vsix
 ```
 
-`npm test` 只运行单元测试；`npm run test:integration` 会优先使用本机 VS Code 启动 Extension Host。CI 中可设置 `AI_MANAGER_VSCODE_VERSION=1.121.0` 验证最低支持版本，或通过 `AI_MANAGER_VSCODE_EXECUTABLE` 指定可执行文件。
-
-在 VS Code 中按 `F5` 启动 Extension Development Host。打开 Activity Bar 中的 AI Manager，添加渠道、刷新模型目录并创建别名。
-
-## 隐私
-
-请求日志仅包含渠道、别名、实际模型、耗时、状态码和错误类别。扩展不会记录提示词、响应正文、凭据、同步主密码或派生密钥，也不会读取本机 OpenCode 的认证文件。
+Use `npm test` for unit tests and `npm run test:integration` for the Extension Host integration test. Press `F5` in VS Code to launch an Extension Development Host.
