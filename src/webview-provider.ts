@@ -102,8 +102,18 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
             }
             await this.storage.saveSyncAcknowledged(true);
           }
-          await this.app.saveChannel(payload as Parameters<AppService['saveChannel']>[0]);
-          break;
+          const saved = await this.app.saveChannel(payload as Parameters<AppService['saveChannel']>[0]);
+          await this.postOperationResult('operationSucceeded', message.type);
+          if (saved.enabled) {
+            try {
+              await this.refreshChannelWithProgress(saved.id);
+            } catch (error) {
+              const refreshError = error instanceof Error ? error.message : '模型目录刷新失败';
+              void vscode.window.showErrorMessage(refreshError);
+              await this.sendState();
+            }
+          }
+          return;
         }
         case 'toggleChannel': {
           const channelId = this.parseChannelId(message.payload);
@@ -130,9 +140,7 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
             void vscode.window.showErrorMessage('渠道 ID 无效');
             return;
           }
-          const change = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '正在刷新模型目录…' },
-            () => this.app.refreshChannel(channelId));
-          await notifyCatalogChanges([change]);
+          await this.refreshChannelWithProgress(channelId);
           break;
         }
         case 'testChannel': {
@@ -141,9 +149,7 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
             void vscode.window.showErrorMessage('渠道 ID 无效');
             return;
           }
-          const change = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '正在测试渠道连接…' },
-            () => this.app.refreshChannel(channelId));
-          await notifyCatalogChanges([change]);
+          const change = await this.refreshChannelWithProgress(channelId, '正在测试渠道连接…');
           void vscode.window.showInformationMessage(this.testChannelMessage(change));
           break;
         }
@@ -188,6 +194,15 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
       await this.postOperationResult('operationFailed', message.type, messageText);
       await this.sendState();
     }
+  }
+
+  private async refreshChannelWithProgress(channelId: string, title = '正在刷新模型目录…'): Promise<CatalogChange> {
+    const change = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title },
+      () => this.app.refreshChannel(channelId),
+    );
+    await notifyCatalogChanges([change]);
+    return change;
   }
 
   private testChannelMessage(change: CatalogChange): string {
