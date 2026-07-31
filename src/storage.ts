@@ -1,62 +1,233 @@
+import { watch, type FSWatcher } from 'node:fs';
+import { mkdir, open, readFile, rename, rm, stat, writeFile, type FileHandle } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import * as vscode from 'vscode';
 import { normalizeChannel } from './presets';
-import type { EncryptedVault, SyncProfile } from './sync';
-import type { CatalogModel, ChannelConfig, ChatBindingRecord } from './types';
+import {
+  compareSharedStates,
+  createEmptySharedState,
+  materializeBindings,
+  materializeChannels,
+  materializeChatSettings,
+  materializeChatErrors,
+  materializeModels,
+  mergeSharedStates,
+  modelRecordKey,
+  parseSharedState,
+  serializeSharedState,
+  UnsupportedStateVersionError,
+  type SharedChatSetting,
+  type SharedStateV3,
+  type SharedStoreChange,
+  type VersionedRecord,
+} from './shared-state';
+import type { EncryptedVault, SyncManifestV3, SyncProfile } from './sync';
+import type { CatalogModel, ChannelConfig, ChatBindingRecord, ChatSettingKey } from './types';
 
 const CHANNELS_KEY = 'aiManager.channels';
 const MODELS_KEY = 'aiManager.models';
 const BINDINGS_KEY = 'aiManager.chatBindings';
-const SYNC_PROFILE_KEY = 'aiManager.sync.profile.v1';
-const SYNC_VAULT_KEY = 'aiManager.sync.vault.v1';
+const LEGACY_SYNC_PROFILE_KEY = 'aiManager.sync.profile.v1';
+const LEGACY_SYNC_VAULT_KEY = 'aiManager.sync.vault.v1';
+const SYNC_MANIFEST_KEY = 'aiManager.sync.manifest.v3';
+const SYNC_VAULT_KEY = 'aiManager.sync.vault.v2';
+const SYNC_CHUNK_PREFIX = 'aiManager.sync.chunk.v3.';
 const SYNC_LOCAL_KEY = 'aiManager.sync.localKey.v1';
+// 前缀刻意不使用 aiManager.sync.，避免与 setKeysForSync 注册的同步键混淆。
+const PROFILE_APPLIED_RESET_KEY = 'aiManager.profile.appliedReset.v1';
+const STATE_FILE = 'state-v3.json';
+const VAULT_FILE = 'vault-v1.json';
+const LOCK_FILE = 'state.lock';
+const LOCK_STALE_MS = 30_000;
+const LOCK_WAIT_MS = 3_000;
 
-export class StorageService {
+export interface StorageServiceOptions {
+  directory?: string;
+  deviceId?: string;
+  appName?: string;
+  platform?: NodeJS.Platform;
+  environment?: NodeJS.ProcessEnv;
+  homeDirectory?: string;
+  watch?: boolean;
+}
+
+export class StorageService implements vscode.Disposable {
+  private state = createEmptySharedState();
+  private vault: EncryptedVault | undefined;
+  private initialized = false;
   private stateWriteQueue: Promise<void> = Promise.resolve();
+  private readonly listeners = new Set<(change: SharedStoreChange) => void>();
+  private watcher: FSWatcher | undefined;
+  private watchTimer: NodeJS.Timeout | undefined;
+  private lastSerializedState = '';
+  private lastSerializedVault = '';
+  private stateError: string | undefined;
+  private vaultError: string | undefined;
+  private watchError: string | undefined;
+  private readOnlyReason: string | undefined;
+  private syncedChunkCount = 0;
+  readonly directory: string;
+  readonly deviceId: string;
 
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(
+    private readonly context: vscode.ExtensionContext,
+    private readonly options: StorageServiceOptions = {},
+  ) {
+    const environment = options.environment ?? process.env;
+    this.deviceId = options.deviceId ?? vscode.env?.machineId ?? 'unknown-device';
+    // 开发模式默认使用按 Profile 隔离的 globalStorage，避免调试污染真实用户目录；
+    // 需要人工验证跨 Profile 行为时用 AI_MANAGER_SHARED_DIR 指向一个共享的测试目录。
+    this.directory = options.directory
+      ?? environment.AI_MANAGER_SHARED_DIR
+      ?? (context.extensionMode !== undefined
+        && context.extensionMode !== vscode.ExtensionMode.Production
+        && context.globalStorageUri
+        ? path.join(context.globalStorageUri.fsPath, 'shared-state')
+        : resolveSharedStorageDirectory(
+          options.appName ?? vscode.env?.appName ?? 'Visual Studio Code',
+          options.platform ?? process.platform,
+          environment,
+          options.homeDirectory ?? os.homedir(),
+        ));
+  }
 
-  registerSyncKeys(): void {
-    this.context.globalState.setKeysForSync([SYNC_PROFILE_KEY, SYNC_VAULT_KEY]);
+  async initialize(): Promise<void> {
+    if (this.initialized) return;
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    try {
+      await this.withLock(async () => {
+        const disk = await this.readStateFile(true);
+        if (disk) {
+          this.state = disk;
+        } else if (!this.readOnlyReason) {
+          this.state = this.createLegacyState();
+          await this.writeStateFile(this.state);
+        }
+        const diskVault = await this.readVaultFile(true);
+        this.vault = diskVault?.vault ?? this.context.globalState.get<EncryptedVault>(LEGACY_SYNC_VAULT_KEY);
+        if (this.vault && !diskVault?.vault && !this.readOnlyReason) await this.writeVaultFile(this.vault);
+      });
+    } catch (error) {
+      // 其他窗口正在写入或磁盘暂时不可用时不能阻断扩展激活：保留空内存态并记录原因，
+      // 后续写入会重新读盘合并，文件监听也会在共享文件变化时补齐状态。
+      this.stateError = error instanceof Error ? error.message : '共享状态初始化失败';
+    }
+    this.lastSerializedState = serializeSharedState(this.state);
+    this.lastSerializedVault = JSON.stringify(this.vault);
+    this.initialized = true;
+    if (this.options.watch !== false) this.startWatcher();
+  }
+
+  dispose(): void {
+    if (this.watchTimer) clearTimeout(this.watchTimer);
+    this.watcher?.close();
+    this.listeners.clear();
+  }
+
+  onDidChange(listener: (change: SharedStoreChange) => void): vscode.Disposable {
+    this.listeners.add(listener);
+    return { dispose: () => this.listeners.delete(listener) };
+  }
+
+  // 三个来源分别记录：任一来源恢复不代表其他来源已恢复，不能共用一个字段整体清空。
+  getLastError(): string | undefined {
+    return this.readOnlyReason ?? this.stateError ?? this.vaultError ?? this.watchError;
+  }
+
+  isReadOnly(): boolean {
+    return this.readOnlyReason !== undefined;
+  }
+
+  getSharedState(): SharedStateV3 {
+    return structuredClone(this.state);
+  }
+
+  getSyncGeneration(): number {
+    return this.state.syncGeneration;
   }
 
   getChannels(): ChannelConfig[] {
-    return this.context.globalState.get<ChannelConfig[]>(CHANNELS_KEY, []).map(normalizeChannel);
+    return materializeChannels(this.state).map(normalizeChannel);
   }
 
   getModels(): CatalogModel[] {
-    return this.context.globalState.get<CatalogModel[]>(MODELS_KEY, []);
+    return materializeModels(this.state);
   }
 
   async saveChannels(channels: ChannelConfig[]): Promise<void> {
-    await this.enqueueStateWrite(() => this.context.globalState.update(CHANNELS_KEY, channels));
+    await this.updateSharedState((state) => {
+      this.replaceChannels(state, channels);
+    });
   }
 
   async updateChannels(update: (channels: ChannelConfig[]) => ChannelConfig[]): Promise<ChannelConfig[]> {
-    return this.enqueueStateWrite(async () => {
-      const channels = update(this.getChannels());
-      await this.context.globalState.update(CHANNELS_KEY, channels);
-      return channels;
+    let updated: ChannelConfig[] = [];
+    await this.updateSharedState((state) => {
+      updated = update(materializeChannels(state).map(normalizeChannel));
+      this.replaceChannels(state, updated);
     });
+    return updated;
   }
 
   async saveModels(models: CatalogModel[]): Promise<void> {
-    await this.enqueueStateWrite(() => this.context.globalState.update(MODELS_KEY, models));
+    await this.updateSharedState((state) => this.replaceRecords(
+      state,
+      state.models,
+      models,
+      (model) => modelRecordKey(model.channelId, model.id),
+    ));
   }
 
   async updateModels(update: (models: CatalogModel[]) => CatalogModel[]): Promise<CatalogModel[]> {
-    return this.enqueueStateWrite(async () => {
-      const models = update(this.getModels());
-      await this.context.globalState.update(MODELS_KEY, models);
-      return models;
+    let updated: CatalogModel[] = [];
+    await this.updateSharedState((state) => {
+      updated = update(materializeModels(state));
+      this.replaceRecords(state, state.models, updated, (model) => modelRecordKey(model.channelId, model.id));
     });
+    return updated;
   }
 
   getChatBindings(): ChatBindingRecord[] {
-    return this.context.globalState.get<ChatBindingRecord[]>(BINDINGS_KEY, []);
+    return materializeBindings(this.state);
   }
 
-  async saveChatBindings(bindings: ChatBindingRecord[]): Promise<void> {
-    await this.enqueueStateWrite(() => this.context.globalState.update(BINDINGS_KEY, bindings));
+  // Chat 绑定与共享设置按键增量写入：调用方持有的快照在等待锁期间可能已经过期，
+  // 整表替换会把其他 Profile 新增的记录标记为删除。
+  async upsertChatBindings(bindings: readonly ChatBindingRecord[]): Promise<void> {
+    if (bindings.length === 0) return;
+    await this.updateSharedState((state) => {
+      for (const binding of bindings) this.writeRecord(state, state.bindings, binding.setting, binding);
+    });
+  }
+
+  async deleteChatBindings(settings: readonly ChatSettingKey[]): Promise<void> {
+    if (settings.length === 0) return;
+    await this.updateSharedState((state) => {
+      for (const setting of settings) this.deleteRecord(state, state.bindings, setting);
+    });
+  }
+
+  getSharedChatSettings(): SharedChatSetting[] {
+    return materializeChatSettings(this.state);
+  }
+
+  async upsertSharedChatSettings(settings: readonly SharedChatSetting[]): Promise<void> {
+    if (settings.length === 0) return;
+    await this.updateSharedState((state) => {
+      for (const setting of settings) this.writeRecord(state, state.chatSettings, setting.setting, setting);
+    });
+  }
+
+  getChatApplicationErrors(): Partial<Record<ChatSettingKey, string>> {
+    return materializeChatErrors(this.state);
+  }
+
+  async saveChatApplicationError(setting: ChatSettingKey, message: string | undefined): Promise<void> {
+    await this.updateSharedState((state) => {
+      if (message) this.writeRecord(state, state.chatErrors, setting, message);
+      else this.deleteRecord(state, state.chatErrors, setting);
+    });
   }
 
   async getApiKey(channelId: string): Promise<string | undefined> {
@@ -69,9 +240,7 @@ export class StorageService {
 
   async saveApiKey(channelId: string, apiKey: string): Promise<void> {
     const value = apiKey.trim();
-    if (value) {
-      await this.context.secrets.store(this.secretKey(channelId), value);
-    }
+    if (value) await this.context.secrets.store(this.secretKey(channelId), value);
   }
 
   async deleteApiKey(channelId: string): Promise<void> {
@@ -79,19 +248,81 @@ export class StorageService {
   }
 
   getSyncProfile(): SyncProfile | undefined {
-    return this.context.globalState.get<SyncProfile>(SYNC_PROFILE_KEY);
+    return this.context.globalState.get<SyncProfile>(LEGACY_SYNC_PROFILE_KEY);
   }
 
   async saveSyncProfile(profile: SyncProfile | undefined): Promise<void> {
-    await this.enqueueStateWrite(() => this.context.globalState.update(SYNC_PROFILE_KEY, profile));
+    await this.context.globalState.update(LEGACY_SYNC_PROFILE_KEY, profile);
   }
 
   getSyncVault(): EncryptedVault | undefined {
-    return this.context.globalState.get<EncryptedVault>(SYNC_VAULT_KEY);
+    return this.vault;
   }
 
   async saveSyncVault(vault: EncryptedVault | undefined): Promise<void> {
-    await this.enqueueStateWrite(() => this.context.globalState.update(SYNC_VAULT_KEY, vault));
+    await this.enqueueStateWrite(async () => {
+      await this.ensureInitialized();
+      if (this.readOnlyReason) throw new Error(this.readOnlyReason);
+      await this.withLock(async () => {
+        this.vault = vault;
+        if (vault) await this.writeVaultFile(vault);
+        else await rm(path.join(this.directory, VAULT_FILE), { force: true });
+        this.lastSerializedVault = JSON.stringify(vault);
+      });
+      await this.context.globalState.update(SYNC_VAULT_KEY, vault);
+    });
+  }
+
+  getSyncedVault(): EncryptedVault | undefined {
+    return this.context.globalState.get<EncryptedVault>(SYNC_VAULT_KEY)
+      ?? this.context.globalState.get<EncryptedVault>(LEGACY_SYNC_VAULT_KEY);
+  }
+
+  async saveSyncedVault(vault: EncryptedVault | undefined): Promise<void> {
+    await this.context.globalState.update(SYNC_VAULT_KEY, vault);
+  }
+
+  getSyncManifest(): SyncManifestV3 | undefined {
+    return this.context.globalState.get<SyncManifestV3>(SYNC_MANIFEST_KEY);
+  }
+
+  async saveSyncManifest(manifest: SyncManifestV3 | undefined): Promise<void> {
+    await this.context.globalState.update(SYNC_MANIFEST_KEY, manifest);
+  }
+
+  getSyncChunk(index: number): string | undefined {
+    return this.context.globalState.get<string>(`${SYNC_CHUNK_PREFIX}${index}`);
+  }
+
+  async saveSyncChunks(chunks: readonly string[]): Promise<void> {
+    const previousCount = Math.max(this.syncedChunkCount, this.getSyncManifest()?.chunkCount ?? 0);
+    for (let index = 0; index < chunks.length; index += 1) {
+      await this.context.globalState.update(`${SYNC_CHUNK_PREFIX}${index}`, chunks[index]);
+    }
+    for (let index = chunks.length; index < previousCount; index += 1) {
+      await this.context.globalState.update(`${SYNC_CHUNK_PREFIX}${index}`, undefined);
+    }
+    this.syncedChunkCount = chunks.length;
+    this.registerSyncKeys(chunks.length);
+  }
+
+  registerSyncKeys(chunkCount = this.getSyncManifest()?.chunkCount ?? 0): void {
+    this.syncedChunkCount = chunkCount;
+    this.context.globalState.setKeysForSync([
+      SYNC_MANIFEST_KEY,
+      SYNC_VAULT_KEY,
+      ...Array.from({ length: chunkCount }, (_, index) => `${SYNC_CHUNK_PREFIX}${index}`),
+    ]);
+  }
+
+  // 已执行的重置代次属于单个 Profile：共享状态跨 Profile 与跨设备传播，
+  // 一旦携带该标记，先执行的 Profile 会让其他 Profile 跳过各自 SecretStorage 的清理。
+  getAppliedResetGeneration(): number {
+    return this.context.globalState.get<number>(PROFILE_APPLIED_RESET_KEY, 0);
+  }
+
+  async saveAppliedResetGeneration(generation: number): Promise<void> {
+    await this.context.globalState.update(PROFILE_APPLIED_RESET_KEY, generation);
   }
 
   async getSyncLocalKey(): Promise<string | undefined> {
@@ -106,6 +337,256 @@ export class StorageService {
     await this.context.secrets.delete(SYNC_LOCAL_KEY);
   }
 
+  async mergeRemoteState(remote: SharedStateV3): Promise<boolean> {
+    let changed = false;
+    await this.updateSharedState((state) => {
+      const merged = mergeSharedStates(state, remote);
+      changed = !compareSharedStates(state, merged);
+      if (changed) Object.assign(state, merged);
+    }, 'remote');
+    return changed;
+  }
+
+  async incrementSyncGeneration(): Promise<number> {
+    let generation = 0;
+    await this.updateSharedState((state) => {
+      state.syncGeneration += 1;
+      generation = state.syncGeneration;
+    });
+    return generation;
+  }
+
+  private async ensureInitialized(): Promise<void> {
+    if (!this.initialized) await this.initialize();
+  }
+
+  private async updateSharedState(
+    mutate: (state: SharedStateV3) => void,
+    source: SharedStoreChange['source'] = 'local',
+  ): Promise<void> {
+    await this.enqueueStateWrite(async () => {
+      await this.ensureInitialized();
+      if (this.readOnlyReason) throw new Error(this.readOnlyReason);
+      const changed = await this.withLock(async () => {
+        const disk = await this.readStateFile(true);
+        if (disk) this.state = mergeSharedStates(this.state, disk);
+        const before = serializeSharedState(this.state);
+        mutate(this.state);
+        const after = serializeSharedState(this.state);
+        if (after === before) return false;
+        await this.writeStateFile(this.state);
+        this.lastSerializedState = after;
+        return true;
+      });
+      if (changed) this.emitChange(source);
+    });
+  }
+
+  private replaceChannels(state: SharedStateV3, channels: ChannelConfig[]): void {
+    const cores = channels.map(normalizeChannel).map(channelCore);
+    this.replaceRecords(state, state.channels, cores, (channel) => channel.id);
+    const activeIds = new Set(channels.map((channel) => channel.id));
+    for (const channel of channels) {
+      const refresh = {
+        ...(channel.lastRefreshAt === undefined ? {} : { lastRefreshAt: channel.lastRefreshAt }),
+        ...(channel.lastRefreshError === undefined ? {} : { lastRefreshError: channel.lastRefreshError }),
+      };
+      this.writeRecord(state, state.refresh, channel.id, refresh);
+    }
+    for (const key of Object.keys(state.refresh)) {
+      if (!activeIds.has(key)) this.deleteRecord(state, state.refresh, key);
+    }
+  }
+
+  private replaceRecords<T>(
+    state: SharedStateV3,
+    records: Record<string, VersionedRecord<T>>,
+    values: readonly T[],
+    keyOf: (value: T) => string,
+  ): void {
+    const active = new Set<string>();
+    for (const value of values) {
+      const key = keyOf(value);
+      active.add(key);
+      this.writeRecord(state, records, key, value);
+    }
+    for (const key of Object.keys(records)) {
+      if (!active.has(key)) this.deleteRecord(state, records, key);
+    }
+  }
+
+  private writeRecord<T>(
+    state: SharedStateV3,
+    records: Record<string, VersionedRecord<T>>,
+    key: string,
+    value: T,
+  ): void {
+    const current = records[key];
+    if (!current?.deleted && current?.value !== undefined && JSON.stringify(current.value) === JSON.stringify(value)) return;
+    state.clock += 1;
+    records[key] = { revision: state.clock, deviceId: this.deviceId, value };
+  }
+
+  private deleteRecord<T>(
+    state: SharedStateV3,
+    records: Record<string, VersionedRecord<T>>,
+    key: string,
+  ): void {
+    const current = records[key];
+    if (!current || current.deleted) return;
+    state.clock += 1;
+    records[key] = { revision: state.clock, deviceId: this.deviceId, deleted: true };
+  }
+
+  private createLegacyState(): SharedStateV3 {
+    const state = createEmptySharedState();
+    const channels = this.context.globalState.get<ChannelConfig[]>(CHANNELS_KEY, []).map(normalizeChannel);
+    const models = this.context.globalState.get<CatalogModel[]>(MODELS_KEY, []);
+    const bindings = this.context.globalState.get<ChatBindingRecord[]>(BINDINGS_KEY, []);
+    this.replaceChannels(state, channels);
+    this.replaceRecords(state, state.models, models, (model) => modelRecordKey(model.channelId, model.id));
+    this.replaceRecords(state, state.bindings, bindings, (binding) => binding.setting);
+    return state;
+  }
+
+  // preserveCorrupt 只能在已持有文件锁时为 true：重命名目标文件会与其他窗口的写入竞争。
+  private async readStateFile(preserveCorrupt: boolean): Promise<SharedStateV3 | undefined> {
+    try {
+      const content = await readFile(path.join(this.directory, STATE_FILE), 'utf8');
+      const state = parseSharedState(JSON.parse(content));
+      this.stateError = undefined;
+      return state;
+    } catch (error) {
+      if (isMissingFile(error)) {
+        this.stateError = undefined;
+        return undefined;
+      }
+      if (error instanceof UnsupportedStateVersionError) {
+        this.readOnlyReason = error.message;
+        this.stateError = error.message;
+        return undefined;
+      }
+      this.stateError = error instanceof Error ? error.message : '共享状态读取失败';
+      if (preserveCorrupt) await this.preserveCorruptFile(STATE_FILE);
+      return undefined;
+    }
+  }
+
+  // 返回 undefined 表示读取失败，`{ vault: undefined }` 表示文件确实不存在。
+  // 两者不可混同：把读取失败当作保险库已删除，会让同步误判为未启用并清除本机凭据。
+  private async readVaultFile(preserveCorrupt: boolean): Promise<{ vault: EncryptedVault | undefined } | undefined> {
+    try {
+      const vault = JSON.parse(await readFile(path.join(this.directory, VAULT_FILE), 'utf8')) as EncryptedVault;
+      this.vaultError = undefined;
+      return { vault };
+    } catch (error) {
+      if (isMissingFile(error)) {
+        this.vaultError = undefined;
+        return { vault: undefined };
+      }
+      this.vaultError = error instanceof Error ? error.message : '共享保险库读取失败';
+      if (preserveCorrupt) await this.preserveCorruptFile(VAULT_FILE);
+      return undefined;
+    }
+  }
+
+  private async writeStateFile(state: SharedStateV3): Promise<void> {
+    await this.atomicWrite(STATE_FILE, `${serializeSharedState(state, true)}\n`);
+  }
+
+  private async writeVaultFile(vault: EncryptedVault): Promise<void> {
+    await this.atomicWrite(VAULT_FILE, `${JSON.stringify(vault, null, 2)}\n`);
+  }
+
+  private async atomicWrite(fileName: string, content: string): Promise<void> {
+    const target = path.join(this.directory, fileName);
+    const temporary = path.join(this.directory, `${fileName}.${process.pid}.${Date.now()}.tmp`);
+    await writeFile(temporary, content, { encoding: 'utf8', mode: 0o600 });
+    try {
+      await rename(temporary, target);
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async preserveCorruptFile(fileName: string): Promise<void> {
+    const source = path.join(this.directory, fileName);
+    const target = path.join(this.directory, `${fileName}.corrupt-${Date.now()}`);
+    await rename(source, target).catch(() => undefined);
+  }
+
+  private async withLock<T>(operation: () => Promise<T>): Promise<T> {
+    const lockPath = path.join(this.directory, LOCK_FILE);
+    const started = Date.now();
+    while (true) {
+      // 只有获取锁本身的 EEXIST 才重试；operation 抛出的同名错误一旦被当作锁冲突，
+      // 会在锁已释放的情况下重复执行业务逻辑。
+      let handle: FileHandle;
+      try {
+        handle = await open(lockPath, 'wx', 0o600);
+      } catch (error) {
+        if (!isFileExists(error)) throw error;
+        const info = await stat(lockPath).catch(() => undefined);
+        if (info && Date.now() - info.mtimeMs > LOCK_STALE_MS) {
+          await rm(lockPath, { force: true });
+          continue;
+        }
+        if (Date.now() - started >= LOCK_WAIT_MS) throw new Error('共享状态正被其他 VS Code 窗口占用，请稍后重试', { cause: error });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        continue;
+      }
+      try {
+        await handle.writeFile(String(Date.now()), 'utf8');
+        return await operation();
+      } finally {
+        await handle.close();
+        await rm(lockPath, { force: true });
+      }
+    }
+  }
+
+  private startWatcher(): void {
+    this.watcher = watch(this.directory, (_event, fileName) => {
+      // 部分平台在合并事件时不提供文件名，此时按可能变化处理，避免漏掉其他 Profile 的写入。
+      if (fileName !== null && fileName !== STATE_FILE && fileName !== VAULT_FILE) return;
+      if (this.watchTimer) clearTimeout(this.watchTimer);
+      this.watchTimer = setTimeout(() => void this.reloadExternal(), 100);
+    });
+    this.watcher.on('error', (error) => {
+      this.watchError = `共享状态监听失败：${error.message}`;
+    });
+  }
+
+  private async reloadExternal(): Promise<void> {
+    await this.enqueueStateWrite(async () => {
+      // 保险库单独更新时状态文件不会变化，因此状态未变也必须继续检查保险库，
+      // 否则同一台设备上其他 Profile 保存的凭据无法传播过来。
+      let stateChanged = false;
+      const disk = await this.readStateFile(false);
+      if (disk && serializeSharedState(disk) !== this.lastSerializedState) {
+        const merged = mergeSharedStates(this.state, disk);
+        stateChanged = !compareSharedStates(this.state, merged);
+        this.state = merged;
+        this.lastSerializedState = serializeSharedState(merged);
+      }
+      const result = await this.readVaultFile(false);
+      let vaultChanged = false;
+      if (result) {
+        const serializedVault = JSON.stringify(result.vault);
+        vaultChanged = serializedVault !== this.lastSerializedVault;
+        this.vault = result.vault;
+        this.lastSerializedVault = serializedVault;
+      }
+      if (stateChanged || vaultChanged) this.emitChange('external');
+    });
+  }
+
+  private emitChange(source: SharedStoreChange['source']): void {
+    const change = { source, revision: this.state.clock } satisfies SharedStoreChange;
+    for (const listener of this.listeners) listener(change);
+  }
+
   private secretKey(channelId: string): string {
     return `aiManager.channel.${channelId}.apiKey`;
   }
@@ -115,4 +596,52 @@ export class StorageService {
     this.stateWriteQueue = result.then(() => undefined, () => undefined);
     return result;
   }
+}
+
+export function resolveSharedStorageDirectory(
+  appName: string,
+  platform: NodeJS.Platform,
+  environment: NodeJS.ProcessEnv,
+  homeDirectory: string,
+): string {
+  const variant = appName.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/-+/g, '-') || 'vscode';
+  if (platform === 'win32') {
+    return path.join(environment.APPDATA || path.join(homeDirectory, 'AppData', 'Roaming'), 'AI Manager', variant);
+  }
+  if (platform === 'darwin') {
+    return path.join(homeDirectory, 'Library', 'Application Support', 'AI Manager', variant);
+  }
+  return path.join(environment.XDG_CONFIG_HOME || path.join(homeDirectory, '.config'), 'ai-manager', variant);
+}
+
+function isMissingFile(error: unknown): boolean {
+  return isNodeError(error) && error.code === 'ENOENT';
+}
+
+function isFileExists(error: unknown): boolean {
+  return isNodeError(error) && error.code === 'EEXIST';
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error;
+}
+
+function channelCore(channel: ChannelConfig): Omit<ChannelConfig, 'lastRefreshAt' | 'lastRefreshError'> {
+  return {
+    id: channel.id,
+    name: channel.name,
+    preset: channel.preset,
+    baseUrl: channel.baseUrl,
+    modelsPath: channel.modelsPath,
+    chatPath: channel.chatPath,
+    anthropicPath: channel.anthropicPath,
+    geminiPath: channel.geminiPath,
+    defaultProtocol: channel.defaultProtocol,
+    authMode: channel.authMode,
+    enabled: channel.enabled,
+    timeoutMs: channel.timeoutMs,
+    refreshIntervalMinutes: channel.refreshIntervalMinutes,
+    defaultMaxInputTokens: channel.defaultMaxInputTokens,
+    defaultMaxOutputTokens: channel.defaultMaxOutputTokens,
+  };
 }

@@ -13,6 +13,9 @@
   "engines": {
     "vscode": "^1.121.0"
   },
+  "extensionKind": [
+    "ui"
+  ],
   "categories": [
     "AI",
     "Chat"

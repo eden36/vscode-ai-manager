@@ -5,7 +5,13 @@ import { createChannelDefaults, isChannelPreset, PRESET_VALUES } from '../preset
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void };
 
 const vscode = acquireVsCodeApi();
-let state: DashboardState = { channels: [], models: [], chatBindings: {}, sync: { enabled: false, locked: false, hasVault: false } };
+let state: DashboardState = {
+  channels: [],
+  models: [],
+  chatBindings: {},
+  chatErrors: {},
+  sync: { enabled: false, locked: false, hasVault: false, localShared: true, cloudState: 'waiting' },
+};
 const openModelChannels = new Set<string>();
 let chatBindingsRendered = false;
 let lastStateRevision = -1;
@@ -374,9 +380,13 @@ for (const row of chatRows) {
 function renderChatBindings(): void {
   for (const row of chatRows) {
     const target = state.chatBindings[row.key];
+    const error = state.chatErrors[row.key];
     const channelPicker = byId<HTMLSelectElement>(`${row.prefix}-channel`);
     const modelPicker = byId<HTMLSelectElement>(`${row.prefix}-model`);
     byId<HTMLButtonElement>(`${row.prefix}-restore`).hidden = !target;
+    const errorElement = byId<HTMLElement>(`${row.prefix}-error`);
+    errorElement.hidden = !error;
+    errorElement.textContent = error ?? '';
     const previousChannelId = channelPicker.value;
     const previousModelId = modelPicker.value;
     const eligibleChannels = state.channels.filter((item) => eligibleModels(item.id).length > 0);
@@ -429,16 +439,30 @@ byId<HTMLFormElement>('chat-form').addEventListener('submit', (event) => {
 });
 
 function renderSync(): void {
-  const { enabled, locked, hasVault } = state.sync;
+  const { enabled, locked, hasVault, localShared, cloudState, error } = state.sync;
   const status = byId('sync-status');
-  const statusType = syncOperationPending ? 'syncing' : enabled && !locked ? 'synced' : 'unsynced';
+  const statusType = syncOperationPending ? 'syncing' : cloudState === 'error' ? 'unsynced' : enabled && !locked ? 'synced' : 'unsynced';
   status.className = `status sync-status ${statusType}`;
-  status.textContent = statusType === 'syncing' ? '同步中' : statusType === 'synced' ? '已同步' : '未同步';
+  status.textContent = syncOperationPending
+    ? '同步中'
+    : error
+      ? '同步失败'
+      : locked
+        ? '等待解锁'
+        : enabled
+          ? '已加入 VS Code 同步'
+          : localShared
+            ? '本机 Profile 已共享'
+            : '未同步';
   status.title = syncOperationPending
-    ? '正在同步配置和加密保险库。'
-    : locked
-      ? '已收到同步保险库，当前电脑需要输入主密码解锁。'
-      : enabled ? '同步已启用，当前电脑已解锁。' : '尚未启用 AI Manager 跨设备同步。';
+    ? '正在同步完整配置和加密保险库。'
+    : error
+      ? error
+      : locked
+        ? '已收到同步保险库，当前 Profile 需要输入主密码解锁一次。'
+        : enabled
+          ? '本机所有 Profile 共享配置；当前 Profile 已解锁，状态已写入 VS Code Settings Sync。'
+          : '本机所有 Profile 已共享；创建同步主密码后可通过 VS Code Settings Sync 同步到其他设备。';
   byId<HTMLFormElement>('sync-enable-form').hidden = enabled || hasVault;
   byId<HTMLFormElement>('sync-unlock-form').hidden = !locked;
   byId<HTMLFormElement>('sync-change-form').hidden = !enabled || locked;

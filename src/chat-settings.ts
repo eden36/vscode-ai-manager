@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { getModelDisplayName, isModelUsable } from './models';
 import type { StorageService } from './storage';
+import type { SharedChatSetting } from './shared-state';
 import type { CatalogModel, ChannelConfig, ChatBindingRecord, ChatModelTarget, ChatSettingKey } from './types';
 
 export interface ChatSettingSelections {
@@ -28,10 +29,42 @@ const QUALIFIED_MODEL_SETTINGS = new Set<ChatSettingKey>([
   'github.copilot.chat.implementAgent.model',
 ]);
 
-export class ChatBindingService {
+export class ChatBindingService implements vscode.Disposable {
   private operationQueue: Promise<void> = Promise.resolve();
+  private readonly selfWrites = new Map<ChatSettingKey, unknown>();
+  private readonly configurationSubscription: vscode.Disposable | undefined;
 
-  constructor(private readonly storage: StorageService) {}
+  constructor(private readonly storage: StorageService) {
+    this.configurationSubscription = vscode.workspace.onDidChangeConfiguration?.((event) => {
+      if (!SETTING_ENTRIES.some((entry) => event.affectsConfiguration(entry.key))) return;
+      void this.enqueue(() => this.captureManualChanges(event)).catch((error: unknown) => {
+        void vscode.window.showWarningMessage(error instanceof Error ? error.message : 'Chat 设置同步失败');
+      });
+    });
+  }
+
+  dispose(): void {
+    this.configurationSubscription?.dispose();
+  }
+
+  async initialize(): Promise<void> {
+    await this.enqueue(async () => {
+      if (this.storage.getSharedChatSettings().length === 0) {
+        const configuration = vscode.workspace.getConfiguration();
+        await this.storage.upsertSharedChatSettings(SETTING_ENTRIES.map((entry) => {
+          const value = configuration.inspect(entry.key)?.globalValue;
+          return { setting: entry.key, hadValue: value !== undefined, ...(value === undefined ? {} : { value }) };
+        }));
+      } else {
+        await this.applySharedSettingsInternal();
+      }
+      await this.reconcileInternal();
+    });
+  }
+
+  async applySharedSettings(): Promise<void> {
+    return this.enqueue(() => this.applySharedSettingsInternal());
+  }
 
   getSelections(): Partial<Record<ChatSettingKey, ChatModelTarget>> {
     const models = this.storage.getModels();
@@ -73,11 +106,11 @@ export class ChatBindingService {
 
     const configuration = vscode.workspace.getConfiguration();
     const originalBindings = this.storage.getChatBindings();
-    let bindings = originalBindings;
+    const applied: ChatBindingRecord[] = [];
     const snapshots: Array<{ key: ChatSettingKey; hadValue: boolean; value: unknown }> = [];
     try {
       for (const entry of resolved) {
-        const existing = bindings.find((binding) => binding.setting === entry.key);
+        const existing = originalBindings.find((binding) => binding.setting === entry.key);
         const currentGlobalValue = configuration.inspect(entry.key)?.globalValue;
         snapshots.push({ key: entry.key, hadValue: currentGlobalValue !== undefined, value: currentGlobalValue });
         const preservePrevious = existing && Object.is(currentGlobalValue, existing.appliedValue);
@@ -92,12 +125,23 @@ export class ChatBindingService {
             ? existing.previousHadGlobalValue ? { previousGlobalValue: existing.previousGlobalValue } : {}
             : currentGlobalValue !== undefined ? { previousGlobalValue: currentGlobalValue } : {}),
         };
-        bindings = [...bindings.filter((item) => item.setting !== entry.key), binding];
+        applied.push(binding);
       }
-      await this.storage.saveChatBindings(bindings);
+      await this.storage.upsertChatBindings(applied);
+      await this.saveSharedValues(resolved.map((entry) => ({
+        setting: entry.key,
+        hadValue: true,
+        value: this.settingValue(entry.key, entry.channel, entry.model),
+      })));
+      for (const entry of resolved) await this.storage.saveChatApplicationError(entry.key, undefined);
     } catch (error) {
+      const failed = snapshots.at(-1);
+      if (failed) await this.storage.saveChatApplicationError(
+        failed.key,
+        error instanceof Error ? error.message : 'Chat 设置应用失败',
+      );
       await this.rollbackSettings(configuration, snapshots);
-      await this.storage.saveChatBindings(originalBindings);
+      await this.restoreBindings(resolved.map((entry) => entry.key), originalBindings);
       throw error;
     }
     void vscode.window.showInformationMessage(`已应用 ${resolved.length} 项 Chat 设置。`);
@@ -122,10 +166,17 @@ export class ChatBindingService {
         await this.updateSetting(configuration, setting, binding.previousHadGlobalValue ? binding.previousGlobalValue : undefined);
         changed = true;
       }
-      await this.storage.saveChatBindings(bindings.filter((item) => item.setting !== setting));
+      await this.storage.deleteChatBindings([setting]);
+      await this.saveSharedValues([{
+        setting,
+        hadValue: binding.previousHadGlobalValue,
+        ...(binding.previousHadGlobalValue ? { value: binding.previousGlobalValue } : {}),
+      }]);
+      await this.storage.saveChatApplicationError(setting, undefined);
     } catch (error) {
+      await this.storage.saveChatApplicationError(setting, error instanceof Error ? error.message : 'Chat 设置恢复失败');
       if (changed) await this.updateSetting(configuration, setting, currentGlobalValue, false).catch(() => undefined);
-      await this.storage.saveChatBindings(bindings);
+      await this.storage.upsertChatBindings([binding]);
       throw error;
     }
     void vscode.window.showInformationMessage(`${entry.label} 已恢复绑定前设置。`);
@@ -162,10 +213,31 @@ export class ChatBindingService {
           retained.push(binding);
         }
       }
-      await this.storage.saveChatBindings(retained);
+      const retainedKeys = new Set(retained.map((binding) => binding.setting));
+      await this.storage.upsertChatBindings(retained);
+      await this.storage.deleteChatBindings(
+        originalBindings.flatMap((binding) => retainedKeys.has(binding.setting) ? [] : [binding.setting]),
+      );
+      await this.saveSharedValues([
+        ...retained.map((binding) => ({ setting: binding.setting, hadValue: true, value: binding.appliedValue })),
+        ...restored.map((setting) => {
+          const binding = originalBindings.find((item) => item.setting === setting)!;
+          return {
+            setting,
+            hadValue: binding.previousHadGlobalValue,
+            ...(binding.previousHadGlobalValue ? { value: binding.previousGlobalValue } : {}),
+          };
+        }),
+      ]);
+      for (const snapshot of snapshots) await this.storage.saveChatApplicationError(snapshot.key, undefined);
     } catch (error) {
+      const failed = snapshots.at(-1);
+      if (failed) await this.storage.saveChatApplicationError(
+        failed.key,
+        error instanceof Error ? error.message : 'Chat 设置协调失败',
+      );
       await this.rollbackSettings(configuration, snapshots);
-      await this.storage.saveChatBindings(originalBindings);
+      await this.restoreBindings(originalBindings.map((binding) => binding.setting), originalBindings);
       throw error;
     }
     if (restored.length > 0) {
@@ -186,11 +258,16 @@ export class ChatBindingService {
     value: unknown,
     openSettingOnFailure = true,
   ): Promise<void> {
+    // 值已一致时直接返回：VS Code 不会为无变化的写入触发配置事件，
+    // 留下的 selfWrites 标记会把用户后续的同值手动修改误判为自写。
+    if (Object.is(configuration.inspect(setting)?.globalValue, value)) return;
     try {
+      this.selfWrites.set(setting, value);
       await configuration.update(setting, value, vscode.ConfigurationTarget.Global);
       const stored = configuration.inspect(setting)?.globalValue;
       if (!Object.is(stored, value)) throw new Error('设置写入后未生效');
     } catch (error) {
+      this.selfWrites.delete(setting);
       if (QUALIFIED_MODEL_SETTINGS.has(setting) && openSettingOnFailure) {
         void vscode.commands.executeCommand('workbench.action.openSettings', `@id:${setting}`);
         const label = SETTING_ENTRIES.find((entry) => entry.key === setting)?.label ?? setting;
@@ -198,6 +275,69 @@ export class ChatBindingService {
       }
       throw error;
     }
+  }
+
+  private async applySharedSettingsInternal(): Promise<void> {
+    const configuration = vscode.workspace.getConfiguration();
+    const snapshots: Array<{ key: ChatSettingKey; hadValue: boolean; value: unknown }> = [];
+    try {
+      for (const setting of this.storage.getSharedChatSettings()) {
+        const current = configuration.inspect(setting.setting)?.globalValue;
+        const expected = setting.hadValue ? setting.value : undefined;
+        if (Object.is(current, expected)) continue;
+        snapshots.push({ key: setting.setting, hadValue: current !== undefined, value: current });
+        try {
+          await this.updateSetting(configuration, setting.setting, expected);
+          await this.storage.saveChatApplicationError(setting.setting, undefined);
+        } catch (error) {
+          await this.storage.saveChatApplicationError(
+            setting.setting,
+            error instanceof Error ? error.message : '共享 Chat 设置应用失败',
+          );
+          throw error;
+        }
+      }
+    } catch (error) {
+      await this.rollbackSettings(configuration, snapshots);
+      throw error;
+    }
+  }
+
+  private async captureManualChanges(event: vscode.ConfigurationChangeEvent): Promise<void> {
+    const configuration = vscode.workspace.getConfiguration();
+    const bindings = this.storage.getChatBindings();
+    const changes: SharedChatSetting[] = [];
+    const unbound: ChatSettingKey[] = [];
+    for (const entry of SETTING_ENTRIES) {
+      if (!event.affectsConfiguration(entry.key)) continue;
+      const current = configuration.inspect(entry.key)?.globalValue;
+      if (this.selfWrites.has(entry.key) && Object.is(this.selfWrites.get(entry.key), current)) {
+        this.selfWrites.delete(entry.key);
+        continue;
+      }
+      this.selfWrites.delete(entry.key);
+      changes.push({ setting: entry.key, hadValue: current !== undefined, ...(current === undefined ? {} : { value: current }) });
+      await this.storage.saveChatApplicationError(entry.key, undefined);
+      const binding = bindings.find((item) => item.setting === entry.key);
+      if (binding && !Object.is(binding.appliedValue, current)) unbound.push(entry.key);
+    }
+    await this.storage.deleteChatBindings(unbound);
+    await this.saveSharedValues(changes);
+  }
+
+  private async saveSharedValues(changes: readonly SharedChatSetting[]): Promise<void> {
+    await this.storage.upsertSharedChatSettings(changes);
+  }
+
+  /** 定向恢复指定设置的绑定：原来不存在的键改为删除，避免整表覆盖其他 Profile 的记录。 */
+  private async restoreBindings(
+    settings: readonly ChatSettingKey[],
+    originalBindings: readonly ChatBindingRecord[],
+  ): Promise<void> {
+    const previous = originalBindings.filter((binding) => settings.includes(binding.setting));
+    const previousKeys = new Set(previous.map((binding) => binding.setting));
+    await this.storage.upsertChatBindings(previous);
+    await this.storage.deleteChatBindings(settings.filter((setting) => !previousKeys.has(setting)));
   }
 
   private async rollbackSettings(

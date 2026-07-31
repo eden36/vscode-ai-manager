@@ -39,11 +39,16 @@ export class AppService implements vscode.Disposable {
     this.changeEmitter.dispose();
   }
 
+  notifyExternalChange(): void {
+    this.changeEmitter.fire();
+  }
+
   async getDashboardState(): Promise<DashboardState> {
     return {
       channels: await Promise.all(this.storage.getChannels().map(async (channel) => ({ ...channel, hasCredential: await this.storage.hasApiKey(channel.id) }))),
       models: this.storage.getModels(),
       chatBindings: this.chatBindings.getSelections(),
+      chatErrors: this.storage.getChatApplicationErrors(),
       sync: this.sync.getStatus(),
     };
   }

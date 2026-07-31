@@ -17,7 +17,7 @@ AI Manager 是一个 VS Code 桌面扩展，用于集中管理 OpenAI-compatible
 - 为发现的模型设置别名、筛选条件、元数据和启用状态。
 - 将已启用的模型注册到 VS Code 原生 Chat 模型选择器。
 - 分别为 Chat、Inline Chat、Plan、Plan 实现阶段、Utility 和 Utility Small 设置绑定模型。
-- 使用 VS Code `SecretStorage` 保存 API Key，并可通过 `Settings Sync` 加密同步。
+- 同一 VS Code 发行版的所有 Profile 自动共享渠道、完整模型目录、刷新状态和 Chat 绑定，并可通过 `Settings Sync` 加密同步到其他设备。
 
 ## 界面截图
 
@@ -53,17 +53,18 @@ OpenCode Go 会自动推断已知模型系列使用的协议。你也可以在�
 
 ## 跨设备同步
 
-AI Manager 可以通过 VS Code `Settings Sync` 同步渠道、模型偏好和加密后的 API Key。
+同一 VS Code 发行版的所有 Profile 会通过本机共享目录共用渠道、完整模型目录、刷新结果、Chat 绑定和加密保险库。在任一 Profile 手动修改 Chat 设置后，其他 Profile 也会自动应用；Stable、Insiders 等不同发行版使用相互隔离的目录。
 
-启用同步后，API Key 会先使用 PBKDF2-SHA256 和 AES-256-GCM 加密，再写入同步存储。同步主密码不会被保存，本机 `SecretStorage` 中只保存派生密钥。
+启用跨设备同步后，完整共享状态会经过压缩和完整性校验，再写入 VS Code `Settings Sync`。API Key 会先使用 PBKDF2-SHA256 和 AES-256-GCM 加密；同步主密码不会被保存，每个 Profile 的 `SecretStorage` 中只保存自己的派生密钥。
 
-在另一台电脑上登录同一个 VS Code 账号并启用 `Settings Sync`，然后使用相同的同步主密码解锁一次 AI Manager。若忘记主密码，只能重置保险库；重置会删除同步密文和本机 API Key。
+在另一台电脑上登录同一个 VS Code 账号并启用 `Settings Sync`，然后在每个使用 AI Manager 的 Profile 中使用相同主密码解锁一次。若忘记主密码，只能重置保险库；重置会删除同步密文和 API Key，但保留本机非敏感配置。
 
 ## 注意事项与限制
 
 - Chat 默认模型只作用于新建会话，不会替换现有会话中手动选择的模型。
 - Plan 实现阶段模型使用 VS Code 实验性设置，可能因 VS Code 版本或组织策略而不可用。
 - 已停用、不可用或未配置协议接口的模型不会显示在原生模型选择器中。
+- 扩展需要读写本机共享状态目录，因此声明为 UI 扩展。在 Remote-SSH、WSL 和 Codespaces 窗口中，它运行在本地电脑而不是远端主机上。
 
 ## 隐私
 

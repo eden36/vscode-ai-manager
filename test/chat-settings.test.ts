@@ -5,11 +5,16 @@ const mocks = vi.hoisted(() => ({
   updates: [] as Array<[string, unknown]>,
   failSetting: undefined as string | undefined,
   openedSettings: [] as string[],
+  configurationListeners: [] as Array<(event: { affectsConfiguration(key: string): boolean }) => void>,
 }));
 
 vi.mock('vscode', () => ({
   ConfigurationTarget: { Global: 1 },
   workspace: {
+    onDidChangeConfiguration: (listener: (event: { affectsConfiguration(key: string): boolean }) => void) => {
+      mocks.configurationListeners.push(listener);
+      return { dispose: () => undefined };
+    },
     getConfiguration: () => ({
       inspect: (key: string) => ({ globalValue: mocks.globals.get(key) }),
       update: async (key: string, value: unknown) => {
@@ -36,6 +41,8 @@ function createStorage() {
     channels: [channel()],
     models: [model()],
     bindings: [] as any[],
+    chatSettings: [] as any[],
+    chatErrors: {} as Record<string, string>,
   };
   return {
     data,
@@ -43,7 +50,22 @@ function createStorage() {
       getChannels: () => data.channels,
       getModels: () => data.models,
       getChatBindings: () => data.bindings,
-      saveChatBindings: async (bindings: any[]) => { data.bindings = bindings; },
+      upsertChatBindings: async (bindings: any[]) => {
+        const keys = new Set(bindings.map((binding) => binding.setting));
+        data.bindings = [...data.bindings.filter((item) => !keys.has(item.setting)), ...bindings];
+      },
+      deleteChatBindings: async (settings: string[]) => {
+        data.bindings = data.bindings.filter((item) => !settings.includes(item.setting));
+      },
+      getSharedChatSettings: () => data.chatSettings,
+      upsertSharedChatSettings: async (settings: any[]) => {
+        const keys = new Set(settings.map((setting) => setting.setting));
+        data.chatSettings = [...data.chatSettings.filter((item) => !keys.has(item.setting)), ...settings];
+      },
+      saveChatApplicationError: async (setting: string, message: string | undefined) => {
+        if (message) data.chatErrors[setting] = message;
+        else delete data.chatErrors[setting];
+      },
     },
   };
 }
@@ -53,6 +75,7 @@ beforeEach(() => {
   mocks.updates.length = 0;
   mocks.failSetting = undefined;
   mocks.openedSettings.length = 0;
+  mocks.configurationListeners.length = 0;
 });
 
 describe('ChatBindingService', () => {
@@ -206,6 +229,7 @@ describe('ChatBindingService', () => {
       .rejects.toThrow('VS Code 无法应用“Plan Agent 默认模型”模型值');
     expect(mocks.globals.get('chat.planAgent.defaultModel')).toBe('Auto (Vendor Default)');
     expect(data.bindings).toEqual([]);
+    expect(data.chatErrors['chat.planAgent.defaultModel']).toContain('VS Code 无法应用');
     expect(mocks.openedSettings).toEqual(['@id:chat.planAgent.defaultModel']);
   });
 
@@ -218,5 +242,24 @@ describe('ChatBindingService', () => {
     expect(mocks.globals.get('chat.defaultModel')).toBe('auto');
     expect(data.bindings).toEqual([]);
     expect(mocks.openedSettings).toEqual(['@id:chat.defaultModel']);
+  });
+
+  it('将任一 Profile 手动修改的 Chat 设置写入共享状态并解除旧绑定', async () => {
+    const { data, storage } = createStorage();
+    const service = new ChatBindingService(storage as any);
+    await service.initialize();
+    await service.apply({ utility: { channelId: 'channel-1', modelId: 'model-1' } });
+
+    mocks.globals.set('chat.utilityModel', 'manual/model');
+    for (const listener of mocks.configurationListeners) {
+      listener({ affectsConfiguration: (key) => key === 'chat.utilityModel' });
+    }
+
+    await vi.waitFor(() => {
+      expect(data.bindings).toEqual([]);
+      expect(data.chatSettings.find((setting) => setting.setting === 'chat.utilityModel'))
+        .toMatchObject({ hadValue: true, value: 'manual/model' });
+    });
+    service.dispose();
   });
 });

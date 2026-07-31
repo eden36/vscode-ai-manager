@@ -101,6 +101,7 @@ export interface DashboardState {
   channels: Array<ChannelConfig & { hasCredential: boolean }>;
   models: CatalogModel[];
   chatBindings: Partial<Record<ChatSettingKey, ChatModelTarget>>;
+  chatErrors: Partial<Record<ChatSettingKey, string>>;
   sync: SyncStatus;
 }
 
@@ -108,4 +109,7 @@ export interface SyncStatus {
   enabled: boolean;
   locked: boolean;
   hasVault: boolean;
+  localShared: boolean;
+  cloudState: 'waiting' | 'synced' | 'error';
+  error?: string;
 }

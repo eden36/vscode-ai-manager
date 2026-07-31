@@ -82,7 +82,7 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
           break;
         case 'resetSync':
           if (await vscode.window.showWarningMessage(
-            '重置将清除同步保险库、本机解密密钥和所有本机 API Key。此操作无法撤销，是否继续？',
+            '重置将停止跨设备同步，并清除共享保险库、当前 Profile 解密密钥和所有 API Key；渠道、模型和 Chat 设置仍保留在本机共享文件中。其他 Profile 和设备联网后也会清除凭据。此操作无法撤销，是否继续？',
             { modal: true },
             '重置同步',
           ) !== '重置同步') {
@@ -194,7 +194,7 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
       <h1 id="sync-heading">跨设备同步</h1>
       <div class="card form-card">
         <p id="sync-status" class="status sync-status unsynced" role="status" aria-live="polite">未同步</p>
-        <p class="muted">渠道、模型偏好和加密后的 API Key 将通过 VS Code Settings Sync 同步。主密码和派生密钥不会进入同步数据。</p>
+        <p class="muted">本机所有 Profile 共享渠道、完整模型目录、Chat 设置、刷新状态和加密保险库；启用后再通过 VS Code Settings Sync 自动同步到其他设备。每个 Profile 首次使用时需要输入一次主密码，主密码和派生密钥不会进入同步数据。</p>
         <form id="sync-enable-form">
           <label>创建同步主密码<input id="sync-enable-password" type="password" autocomplete="new-password" required></label>
           <label>确认同步主密码<input id="sync-enable-confirmation" type="password" autocomplete="new-password" required></label>
@@ -221,7 +221,7 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
 }
 
 function chatBindingRow(id: string, label: string, description: string): string {
-  return `<fieldset class="chat-binding-row"><legend>${label}</legend><p class="chat-binding-description">${description}</p><label>渠道<select id="${id}-channel"><option value="">保持原设置</option></select></label><label>模型<select id="${id}-model" disabled><option value="">请先选择渠道</option></select></label><button id="${id}-restore" type="button" class="restore-binding" hidden>恢复绑定前设置</button></fieldset>`;
+  return `<fieldset class="chat-binding-row"><legend>${label}</legend><p class="chat-binding-description">${description}</p><p id="${id}-error" class="status error" hidden></p><label>渠道<select id="${id}-channel"><option value="">保持原设置</option></select></label><label>模型<select id="${id}-model" disabled><option value="">请先选择渠道</option></select></label><button id="${id}-restore" type="button" class="restore-binding" hidden>恢复绑定前设置</button></fieldset>`;
 }
 
 function getNonce(): string {

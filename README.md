@@ -17,7 +17,7 @@ Requires VS Code 1.121.0 or later.
 - Rename, filter, configure, and selectively enable discovered models.
 - Register enabled models in the native VS Code Chat model picker.
 - Bind separate models to Chat, Inline Chat, Plan, Plan implementation, Utility, and Utility Small settings.
-- Store API keys in VS Code `SecretStorage`, with optional encrypted synchronization through `Settings Sync`.
+- Share all channels, model catalogs, refresh state, and Chat bindings across local VS Code Profiles, with encrypted cross-device synchronization through `Settings Sync`.
 
 ## Screenshots
 
@@ -53,17 +53,18 @@ OpenCode Go automatically infers the protocol for known model families. You can 
 
 ## Cross-device Sync
 
-AI Manager can synchronize channels, model preferences, and encrypted API keys through VS Code `Settings Sync`.
+All Profiles of the same VS Code edition share channels, the complete model catalog, refresh results, Chat bindings, and the encrypted vault through one local state directory. A Chat setting changed manually in one Profile is propagated to the others. Stable, Insiders, and compatible VS Code editions use separate directories.
 
-When sync is enabled, API keys are encrypted with PBKDF2-SHA256 and AES-256-GCM before entering synchronized storage. The master password is never saved; only the derived key is stored locally in `SecretStorage`.
+When cross-device sync is enabled, the complete shared state is compressed, integrity-checked, and sent through VS Code `Settings Sync`. API keys are encrypted with PBKDF2-SHA256 and AES-256-GCM first. The master password is never saved; each Profile stores only its derived key locally in `SecretStorage`.
 
-On another computer, sign in to the same VS Code account, enable `Settings Sync`, and unlock AI Manager once with the same master password. If the password is lost, the vault must be reset, which removes the synchronized ciphertext and local API keys.
+On another computer, sign in to the same VS Code account, enable `Settings Sync`, and unlock AI Manager once in every Profile that uses the extension. If the password is lost, the vault must be reset, which removes the synchronized ciphertext and API keys while retaining the local non-secret configuration.
 
 ## Notes and Limitations
 
 - The main Chat default model applies to new conversations and does not replace a model manually selected in an existing conversation.
 - The Plan implementation model uses an experimental VS Code setting and may be unavailable because of the VS Code version or organization policy.
 - Disabled, unavailable, or unconfigured models are not exposed to the native model picker.
+- The extension reads and writes a local shared state directory, so it is declared as a UI extension. In Remote-SSH, WSL, and Codespaces windows it runs on the local machine rather than on the remote host.
 
 ## Privacy
 

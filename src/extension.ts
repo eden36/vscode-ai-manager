@@ -10,21 +10,37 @@ import { DashboardWebviewProvider } from './webview-provider';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel('AI Manager');
+  // 共享状态可能被更高版本的扩展写成只读，也可能正被其他窗口占用。
+  // 任一启动步骤失败都不能阻断激活，否则用户连管理界面都打不开，看不到升级或重试提示。
+  const startupFailures: string[] = [];
+  const runStartupStep = async (label: string, step: () => Promise<void>): Promise<void> => {
+    try {
+      await step();
+    } catch (error) {
+      startupFailures.push(error instanceof Error ? error.message : `${label}失败`);
+      output.appendLine(`[${new Date().toISOString()}] ${label}失败 类别=${error instanceof Error ? error.name : 'unknown'}`);
+    }
+  };
+
   const storage = new StorageService(context);
+  await runStartupStep('共享状态初始化', () => storage.initialize());
   const sync = new SyncService(storage);
-  await sync.initialize();
+  await runStartupStep('同步初始化', () => sync.initialize());
   const catalog = new CatalogService(storage, sync);
   const chatBindings = new ChatBindingService(storage);
-  await chatBindings.reconcile();
+  await runStartupStep('Chat 设置初始化', () => chatBindings.initialize());
+  await runStartupStep('同步状态发布', () => sync.saveProfileFromLocal());
   const app = new AppService(storage, catalog, chatBindings, sync);
   const dashboard = new DashboardWebviewProvider(context.extensionUri, app, chatBindings);
   const languageProvider = new AiManagerLanguageProvider(app, output);
 
   context.subscriptions.push(
     output,
+    storage,
     app,
     dashboard,
     languageProvider,
+    chatBindings,
     vscode.window.registerWebviewViewProvider('aiManager.dashboard', dashboard),
     vscode.lm.registerLanguageModelChatProvider('ai-manager', languageProvider),
     vscode.commands.registerCommand('aiManager.open', () => vscode.commands.executeCommand('workbench.view.extension.aiManager')),
@@ -43,6 +59,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return vscode.commands.executeCommand('workbench.view.extension.aiManager');
     }),
   );
+
+  context.subscriptions.push(storage.onDidChange((change) => {
+    void (async () => {
+      if (change.source === 'local') {
+        await sync.saveProfileFromLocal();
+        // 手动修改 VS Code Chat 设置也会写入共享状态，此时没有其他环节刷新面板。
+        app.notifyExternalChange();
+        return;
+      }
+      if (change.source === 'external') await sync.reconcile();
+      await chatBindings.applySharedSettings();
+      await chatBindings.reconcile();
+      app.notifyExternalChange();
+    })().catch((error: unknown) => {
+      output.appendLine(`[${new Date().toISOString()}] 共享状态应用失败 类别=${error instanceof Error ? error.name : 'unknown'}`);
+    });
+  }));
+
+  if (startupFailures.length > 0) {
+    void vscode.window.showWarningMessage(`AI Manager 启动未完成：${startupFailures[0]}。部分功能可能不可用，请打开 AI Manager 面板查看状态。`);
+  }
 
   if (sync.getStatus().locked) {
     void vscode.window.showInformationMessage('AI Manager 已收到同步的 API Key，请先输入同步主密码解锁。', '立即解锁').then(async (choice) => {
