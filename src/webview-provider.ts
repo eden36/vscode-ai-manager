@@ -1,14 +1,49 @@
+import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { AppService } from './app-service';
 import { notifyCatalogChanges } from './catalog-notifications';
 import { CHANNEL_PRESETS } from './presets';
+import type { StorageService } from './storage';
 import type { ChatBindingService, ChatSettingSelections } from './chat-settings';
-import type { ChatSettingKey } from './types';
+import type { CatalogChange, ChatSettingKey, ModelProtocol } from './types';
 
 interface WebviewMessage {
   type: string;
-  payload?: any;
+  payload?: unknown;
 }
+
+interface SaveChannelPayload {
+  id?: string;
+  preset?: string;
+  name?: string;
+  baseUrl?: string;
+  modelsPath?: string;
+  chatPath?: string;
+  anthropicPath?: string;
+  geminiPath?: string;
+  defaultProtocol?: string;
+  authMode?: string;
+  apiKey?: string;
+  clearApiKey?: boolean;
+  timeoutMs?: number;
+  refreshIntervalMinutes?: number;
+  defaultMaxInputTokens?: number;
+  defaultMaxOutputTokens?: number;
+  enabled?: boolean;
+}
+
+interface SaveModelPayload {
+  channelId?: string;
+  id?: string;
+  customAlias?: string;
+  enabled?: boolean;
+  protocol?: string;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  toolCalling?: boolean;
+}
+
+const SYNC_CREDENTIAL_NOTICE = 'API Key 将存入本机加密保险库。若你已启用 VS Code Settings Sync，凭据会随同步数据传播到同一账号的其他设备与 Profile。安全边界依赖 VS Code 账号与 Settings Sync 加密，而非用户主密码。是否继续保存？';
 
 export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private view?: vscode.WebviewView;
@@ -20,6 +55,7 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
     private readonly extensionUri: vscode.Uri,
     private readonly app: AppService,
     private readonly chatBindings: ChatBindingService,
+    private readonly storage: StorageService,
   ) {
     this.changeSubscription = app.onDidChange(() => void this.sendState());
   }
@@ -43,44 +79,101 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
         case 'ready':
           await this.sendState();
           return;
-        case 'saveChannel':
-          await this.app.saveChannel(message.payload);
+        case 'saveChannel': {
+          const payload = this.parseSaveChannelPayload(message.payload);
+          if (!payload) {
+            void vscode.window.showErrorMessage('渠道数据无效');
+            await this.postOperationResult('operationFailed', message.type, '渠道数据无效');
+            return;
+          }
+          if (payload.apiKey?.trim() && !this.storage.getSyncAcknowledged()) {
+            const confirmed = await vscode.window.showWarningMessage(
+              SYNC_CREDENTIAL_NOTICE,
+              { modal: true },
+              '继续保存',
+            );
+            if (confirmed !== '继续保存') {
+              await this.postOperationResult('operationCancelled', message.type);
+              return;
+            }
+            await this.storage.saveSyncAcknowledged(true);
+          }
+          await this.app.saveChannel(payload as Parameters<AppService['saveChannel']>[0]);
           break;
-        case 'toggleChannel':
-          await this.app.toggleChannel(String(message.payload?.channelId ?? ''));
+        }
+        case 'toggleChannel': {
+          const channelId = this.parseChannelId(message.payload);
+          if (!channelId) {
+            void vscode.window.showErrorMessage('渠道 ID 无效');
+            return;
+          }
+          await this.app.toggleChannel(channelId);
           break;
-        case 'deleteChannel':
+        }
+        case 'deleteChannel': {
+          const channelId = this.parseChannelId(message.payload);
+          if (!channelId) {
+            void vscode.window.showErrorMessage('渠道 ID 无效');
+            return;
+          }
           if (await vscode.window.showWarningMessage('确定删除该渠道及其模型缓存吗？', { modal: true }, '删除') !== '删除') return;
-          await this.app.deleteChannel(String(message.payload?.channelId ?? ''));
+          await this.app.deleteChannel(channelId);
           break;
+        }
         case 'refreshChannel': {
+          const channelId = this.parseChannelId(message.payload);
+          if (!channelId) {
+            void vscode.window.showErrorMessage('渠道 ID 无效');
+            return;
+          }
           const change = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '正在刷新模型目录…' },
-            () => this.app.refreshChannel(String(message.payload?.channelId ?? '')));
+            () => this.app.refreshChannel(channelId));
           await notifyCatalogChanges([change]);
           break;
         }
         case 'testChannel': {
+          const channelId = this.parseChannelId(message.payload);
+          if (!channelId) {
+            void vscode.window.showErrorMessage('渠道 ID 无效');
+            return;
+          }
           const change = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '正在测试渠道连接…' },
-            () => this.app.refreshChannel(String(message.payload?.channelId ?? '')));
+            () => this.app.refreshChannel(channelId));
           await notifyCatalogChanges([change]);
-          void vscode.window.showInformationMessage('渠道连接成功，模型目录已更新。');
+          void vscode.window.showInformationMessage(this.testChannelMessage(change));
           break;
         }
-        case 'saveModel':
-          await this.app.saveModel(message.payload);
+        case 'saveModel': {
+          const payload = this.parseSaveModelPayload(message.payload);
+          if (!payload) {
+            void vscode.window.showErrorMessage('模型数据无效');
+            await this.postOperationResult('operationFailed', message.type, '模型数据无效');
+            return;
+          }
+          await this.app.saveModel({
+            channelId: payload.channelId!,
+            id: payload.id!,
+            ...(payload.customAlias !== undefined ? { customAlias: payload.customAlias } : {}),
+            ...(payload.enabled !== undefined ? { enabled: payload.enabled } : {}),
+            ...(payload.protocol !== undefined ? { protocol: payload.protocol as ModelProtocol } : {}),
+            ...(payload.maxInputTokens !== undefined ? { maxInputTokens: payload.maxInputTokens } : {}),
+            ...(payload.maxOutputTokens !== undefined ? { maxOutputTokens: payload.maxOutputTokens } : {}),
+            ...(payload.toolCalling !== undefined ? { toolCalling: payload.toolCalling } : {}),
+          });
           break;
+        }
         case 'applyChatSettings':
           await this.chatBindings.apply(message.payload as ChatSettingSelections);
           await this.postOperationResult('operationSucceeded', message.type);
           await this.sendState();
           return;
         case 'restoreChatSetting':
-          await this.chatBindings.restore(String(message.payload?.setting ?? '') as ChatSettingKey);
+          await this.chatBindings.restore(String((message.payload as { setting?: unknown })?.setting ?? '') as ChatSettingKey);
           await this.postOperationResult('operationSucceeded', message.type);
           await this.sendState();
           return;
         case 'showError':
-          void vscode.window.showErrorMessage(String(message.payload?.message ?? '操作失败'));
+          void vscode.window.showErrorMessage(String((message.payload as { message?: unknown })?.message ?? '操作失败'));
           return;
         default:
           return;
@@ -92,6 +185,35 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
       await this.postOperationResult('operationFailed', message.type, messageText);
       await this.sendState();
     }
+  }
+
+  private testChannelMessage(change: CatalogChange): string {
+    const totalModels = this.app.storage.getModels().filter((model) => model.channelId === change.channelId && model.available).length;
+    if (totalModels > 0) return `渠道连接成功，已发现 ${totalModels} 个模型。`;
+    return '渠道连接成功，但模型目录为空。';
+  }
+
+  private parseChannelId(payload: unknown): string | undefined {
+    const channelId = typeof (payload as { channelId?: unknown })?.channelId === 'string'
+      ? (payload as { channelId: string }).channelId.trim()
+      : '';
+    return channelId || undefined;
+  }
+
+  private parseSaveChannelPayload(payload: unknown): SaveChannelPayload | undefined {
+    if (!payload || typeof payload !== 'object') return undefined;
+    const value = payload as SaveChannelPayload;
+    if (typeof value.name !== 'string' || !value.name.trim()) return undefined;
+    if (typeof value.baseUrl !== 'string' || !value.baseUrl.trim()) return undefined;
+    return value;
+  }
+
+  private parseSaveModelPayload(payload: unknown): SaveModelPayload | undefined {
+    if (!payload || typeof payload !== 'object') return undefined;
+    const value = payload as SaveModelPayload;
+    if (typeof value.channelId !== 'string' || !value.channelId.trim()) return undefined;
+    if (typeof value.id !== 'string' || !value.id.trim()) return undefined;
+    return value;
   }
 
   private async sendState(): Promise<void> {
@@ -181,6 +303,7 @@ function chatBindingPicker(): string {
 }
 
 function getNonce(): string {
+  const bytes = randomBytes(32);
   const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  return Array.from({ length: 32 }, () => characters.charAt(Math.floor(Math.random() * characters.length))).join('');
+  return Array.from(bytes, (byte) => characters.charAt(byte % characters.length)).join('');
 }

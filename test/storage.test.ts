@@ -210,6 +210,13 @@ describe('StorageService', () => {
 
     expect(changes).toBe(1);
   });
+
+  it('同步确认标记默认未确认且可持久化', async () => {
+    expect(storage.getSyncAcknowledged()).toBe(false);
+    await storage.saveSyncAcknowledged(true);
+    expect(storage.getSyncAcknowledged()).toBe(true);
+    expect(values.get('aiManager.profile.syncAcknowledged.v1')).toBe(true);
+  });
 });
 
 describe('resolveSharedStorageDirectory', () => {

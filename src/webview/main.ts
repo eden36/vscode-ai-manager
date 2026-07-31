@@ -12,6 +12,7 @@ let state: DashboardState = {
   chatBindings: {},
   chatErrors: {},
   sync: { enabled: false, locked: false, hasVault: false, localShared: true, cloudState: 'waiting' },
+  readOnly: false,
 };
 const selectedModelIds = new Map<string, string>();
 const modelSearchTerms = new Map<string, string>();
@@ -50,6 +51,8 @@ window.addEventListener('message', (event: MessageEvent) => {
     if (message.operation === 'applyChatSettings' || message.operation === 'restoreChatSetting') chatBindingsRendered = false;
   } else if (message.type === 'operationFailed' && message.operation === 'saveChannel') {
     byId<HTMLButtonElement>('save-channel').disabled = false;
+  } else if (message.type === 'operationCancelled' && message.operation === 'saveChannel') {
+    byId<HTMLButtonElement>('save-channel').disabled = false;
   }
 });
 
@@ -57,8 +60,13 @@ function send(type: string, payload?: unknown): void {
   vscode.postMessage({ type, payload });
 }
 
+function isReadOnly(): boolean {
+  return state.readOnly;
+}
+
 function render(): void {
   renderSyncBanner();
+  byId<HTMLButtonElement>('new-channel').disabled = isReadOnly();
   renderChannels();
   renderChatBindings();
   if (activeModelPickerChannelId) {
@@ -96,11 +104,17 @@ function renderChannels(): void {
     title.className = 'card-title';
     title.textContent = channel.name;
     const controls = document.createElement('div');
+    const editButton = button('编辑', () => openChannelForm(channel));
+    const deleteButton = button('删除', () => send('deleteChannel', { channelId: channel.id }), 'danger');
+    if (isReadOnly()) {
+      editButton.disabled = true;
+      deleteButton.disabled = true;
+    }
     controls.append(
-      button('编辑', () => openChannelForm(channel)),
+      editButton,
       button('测试', () => send('testChannel', { channelId: channel.id })),
       button('刷新', () => send('refreshChannel', { channelId: channel.id })),
-      button('删除', () => send('deleteChannel', { channelId: channel.id }), 'danger'),
+      deleteButton,
     );
     header.append(title, controls);
     const badges = document.createElement('div');
@@ -111,9 +125,11 @@ function renderChannels(): void {
     enabledBadge.title = channel.enabled ? '点击停用渠道' : '点击启用渠道';
     enabledBadge.setAttribute('aria-pressed', String(channel.enabled));
     enabledBadge.addEventListener('click', () => {
+      if (isReadOnly()) return;
       enabledBadge.disabled = true;
       send('toggleChannel', { channelId: channel.id });
     });
+    if (isReadOnly()) enabledBadge.disabled = true;
     const credentialBadge = document.createElement('span');
     credentialBadge.className = 'badge';
     credentialBadge.textContent = channel.hasCredential ? '已保存密钥' : '无密钥';
@@ -268,7 +284,7 @@ function refreshModelPickerOverlay(resetScroll = false): void {
     const toggleModel = button(model.enabled ? '停用' : '启用', () => {
       send('saveModel', { channelId: model.channelId, id: model.id, enabled: !model.enabled });
     }, 'model-option-toggle');
-    toggleModel.disabled = !channel.enabled || !model.available || !protocolConfigured(channel, model.protocol);
+    toggleModel.disabled = isReadOnly() || !channel.enabled || !model.available || !protocolConfigured(channel, model.protocol);
     item.append(select, toggleModel);
     const enabledCheck = document.createElement('span');
     enabledCheck.className = 'model-enabled-check';
@@ -396,7 +412,9 @@ function renderModelRow(channel: ChannelConfig, model: CatalogModel): HTMLElemen
   const fallbackAlias = defaultAlias(channel, model);
   alias.value = model.customAlias ?? fallbackAlias;
   alias.maxLength = 80;
+  if (isReadOnly()) alias.disabled = true;
   const saveAlias = (): void => {
+    if (isReadOnly()) return;
     const normalized = alias.value.trim();
     const customAlias = !normalized || normalized === fallbackAlias ? '' : normalized;
     if (!normalized) alias.value = fallbackAlias;
@@ -418,14 +436,19 @@ function renderModelRow(channel: ChannelConfig, model: CatalogModel): HTMLElemen
   const enabled = document.createElement('input');
   enabled.type = 'checkbox';
   enabled.checked = model.enabled;
-  enabled.disabled = !channel.enabled || !model.available || !protocolConfigured(channel, model.protocol);
-  enabled.addEventListener('change', () => send('saveModel', { channelId: model.channelId, id: model.id, enabled: enabled.checked }));
+  enabled.disabled = isReadOnly() || !channel.enabled || !model.available || !protocolConfigured(channel, model.protocol);
+  enabled.addEventListener('change', () => {
+    if (isReadOnly()) return;
+    send('saveModel', { channelId: model.channelId, id: model.id, enabled: enabled.checked });
+  });
   enabledRow.append(enabledText, enabled);
   top.append(nameRow, aliasRow, enabledRow);
   const metadata = document.createElement('div');
   metadata.className = 'muted';
   metadata.textContent = `${model.protocol} · ${model.available ? '可用' : '目录中已消失'} · ${model.maxInputTokens}/${model.maxOutputTokens} tokens · ${model.toolCalling ? '支持工具' : '未声明工具'}`;
-  row.append(top, metadata, button('编辑元数据', () => openModelEditor(model)));
+  const editMetadata = button('编辑元数据', () => openModelEditor(model));
+  if (isReadOnly()) editMetadata.disabled = true;
+  row.append(top, metadata, editMetadata);
   return row;
 }
 
@@ -457,7 +480,13 @@ function openChannelForm(channel?: ChannelConfig & { hasCredential?: boolean }):
   if (!dialog.open) dialog.showModal();
 }
 
-byId('new-channel').addEventListener('click', () => openChannelForm());
+byId('new-channel').addEventListener('click', () => {
+  if (isReadOnly()) {
+    send('showError', { message: state.readOnlyReason ?? '共享状态为只读，无法修改渠道' });
+    return;
+  }
+  openChannelForm();
+});
 const closeChannelDialog = (): void => {
   byId<HTMLInputElement>('channel-api-key').value = '';
   byId<HTMLButtonElement>('save-channel').disabled = false;
@@ -485,6 +514,10 @@ byId<HTMLSelectElement>('channel-preset').addEventListener('change', (event) => 
 });
 byId<HTMLFormElement>('channel-form').addEventListener('submit', (event) => {
   event.preventDefault();
+  if (isReadOnly()) {
+    send('showError', { message: state.readOnlyReason ?? '共享状态为只读，无法保存渠道' });
+    return;
+  }
   byId<HTMLButtonElement>('save-channel').disabled = true;
   send('saveChannel', {
     id: value('channel-id') || undefined,
@@ -508,6 +541,10 @@ byId<HTMLFormElement>('channel-form').addEventListener('submit', (event) => {
 });
 
 function openModelEditor(model: CatalogModel): void {
+  if (isReadOnly()) {
+    send('showError', { message: state.readOnlyReason ?? '共享状态为只读，无法编辑模型' });
+    return;
+  }
   const container = byId('model-editor');
   const current = state.models.find((item) => item.channelId === model.channelId && item.id === model.id) ?? model;
   const baseline = catalogMetadataBaseline(current);
@@ -677,6 +714,13 @@ function renderChatBindings(): void {
   renderChatBindingPicker();
   showChatBinding(selectedChatBindingPrefix);
   chatBindingsRendered = true;
+  const readOnly = isReadOnly();
+  byId<HTMLFormElement>('chat-form').querySelector<HTMLButtonElement>('button.primary')!.disabled = readOnly;
+  for (const row of chatRows) {
+    byId<HTMLSelectElement>(`${row.prefix}-channel`).disabled = readOnly;
+    byId<HTMLSelectElement>(`${row.prefix}-model`).disabled = readOnly || !value(`${row.prefix}-channel`);
+    byId<HTMLButtonElement>(`${row.prefix}-restore`).disabled = readOnly;
+  }
 }
 
 function showChatBinding(prefix: string): void {
@@ -706,6 +750,10 @@ function eligibleModels(channelId: string): CatalogModel[] {
 
 byId<HTMLFormElement>('chat-form').addEventListener('submit', (event) => {
   event.preventDefault();
+  if (isReadOnly()) {
+    send('showError', { message: state.readOnlyReason ?? '共享状态为只读，无法应用 Chat 设置' });
+    return;
+  }
   const payload: Record<string, ChatModelTarget> = {};
   for (const row of chatRows) {
     const channelId = value(`${row.prefix}-channel`);
@@ -729,8 +777,16 @@ byId<HTMLFormElement>('chat-form').addEventListener('submit', (event) => {
 
 function renderSyncBanner(): void {
   const banner = byId('sync-banner');
-  const { locked, cloudState, error } = state.sync;
-  const visible = cloudState === 'error' || locked;
+  if (state.readOnly) {
+    banner.hidden = false;
+    banner.className = 'sync-banner status error';
+    banner.textContent = state.readOnlyReason ?? '共享状态文件版本过高，当前扩展为只读模式，请升级 AI Manager。';
+    banner.title = banner.textContent;
+    return;
+  }
+  const { enabled, locked, cloudState, error } = state.sync;
+  const showInfo = enabled && !locked && cloudState === 'synced';
+  const visible = cloudState === 'error' || locked || showInfo;
   banner.hidden = !visible;
   if (!visible) return;
   if (cloudState === 'error') {
@@ -739,9 +795,15 @@ function renderSyncBanner(): void {
     banner.title = error ?? '';
     return;
   }
-  banner.className = 'sync-banner status';
-  banner.textContent = '等待同步密钥：加密密钥尚未从 VS Code Settings Sync 到达，稍后会自动完成。';
-  banner.title = '跨设备 API Key 同步会在密钥到达后自动恢复。';
+  if (locked) {
+    banner.className = 'sync-banner status';
+    banner.textContent = '等待同步密钥：加密密钥尚未从 VS Code Settings Sync 到达，稍后会自动完成。';
+    banner.title = '跨设备 API Key 同步会在密钥到达后自动恢复。';
+    return;
+  }
+  banner.className = 'sync-banner status info';
+  banner.textContent = '已同步';
+  banner.title = '';
 }
 
 function option(value: string, label: string): HTMLOptionElement {

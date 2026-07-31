@@ -120,4 +120,22 @@ describe('AppService', () => {
       metadataOverridden: false,
     });
   });
+
+  it('getDashboardState 暴露只读状态', async () => {
+    const storage = {
+      getChannels: () => [],
+      getModels: () => [],
+      isReadOnly: () => true,
+      getLastError: () => '状态版本过高',
+      hasApiKey: async () => false,
+      getChatApplicationErrors: () => ({}),
+    };
+    const sync = { getStatus: () => ({ enabled: false, locked: false, hasVault: false, localShared: true, cloudState: 'waiting' as const }) };
+    const app = new AppService(storage as any, {} as any, { getSelections: () => ({}), getChatApplicationErrors: () => ({}) } as any, sync as any);
+
+    const state = await app.getDashboardState();
+
+    expect(state.readOnly).toBe(true);
+    expect(state.readOnlyReason).toBe('状态版本过高');
+  });
 });

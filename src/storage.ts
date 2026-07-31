@@ -33,6 +33,7 @@ const SYNC_ENCRYPTION_KEY = 'aiManager.sync.encryptionKey.v1';
 const VAULT_KEY_FILE = 'vault-key-v1';
 // 前缀刻意不使用 aiManager.sync.，避免与 setKeysForSync 注册的同步键混淆。
 const PROFILE_APPLIED_RESET_KEY = 'aiManager.profile.appliedReset.v1';
+const PROFILE_SYNC_ACKNOWLEDGED_KEY = 'aiManager.profile.syncAcknowledged.v1';
 const STATE_FILE = 'state-v3.json';
 const VAULT_FILE = 'vault-v1.json';
 const LOCK_FILE = 'state.lock';
@@ -312,6 +313,14 @@ export class StorageService implements vscode.Disposable {
 
   async saveAppliedResetGeneration(generation: number): Promise<void> {
     await this.context.globalState.update(PROFILE_APPLIED_RESET_KEY, generation);
+  }
+
+  getSyncAcknowledged(): boolean {
+    return this.context.globalState.get<boolean>(PROFILE_SYNC_ACKNOWLEDGED_KEY, false);
+  }
+
+  async saveSyncAcknowledged(acknowledged: boolean): Promise<void> {
+    await this.context.globalState.update(PROFILE_SYNC_ACKNOWLEDGED_KEY, acknowledged);
   }
 
   async getSyncLocalKey(): Promise<string | undefined> {

@@ -111,6 +111,8 @@ export interface DashboardState {
   chatBindings: Partial<Record<ChatSettingKey, ChatModelTarget>>;
   chatErrors: Partial<Record<ChatSettingKey, string>>;
   sync: SyncStatus;
+  readOnly: boolean;
+  readOnlyReason?: string;
 }
 
 export interface SyncStatus {

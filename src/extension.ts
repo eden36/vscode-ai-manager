@@ -31,7 +31,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await runStartupStep('Chat 设置初始化', () => chatBindings.initialize());
   await runStartupStep('同步状态发布', () => sync.saveProfileFromLocal());
   const app = new AppService(storage, catalog, chatBindings, sync);
-  const dashboard = new DashboardWebviewProvider(context.extensionUri, app, chatBindings);
+  const dashboard = new DashboardWebviewProvider(context.extensionUri, app, chatBindings, storage);
   const languageProvider = new AiManagerLanguageProvider(app, output);
 
   context.subscriptions.push(
@@ -97,13 +97,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }).catch((error: unknown) => {
     output.appendLine(`[${new Date().toISOString()}] 启动刷新失败 类别=${error instanceof Error ? error.name : 'unknown'}`);
   });
-  const timer = setInterval(() => void app.refreshAll(true, true).then(async (summary) => {
-    await notifyCatalogChanges(summary.changes);
-    for (const failure of summary.failures) output.appendLine(`[${new Date().toISOString()}] 定时刷新失败 渠道=${failure.channelName} 类别=${failure.message}`);
-  }).catch((error: unknown) => {
-    output.appendLine(`[${new Date().toISOString()}] 定时刷新失败 类别=${error instanceof Error ? error.name : 'unknown'}`);
-  }), 60_000);
-  context.subscriptions.push({ dispose: () => clearInterval(timer) });
+
+  let refreshTimer: ReturnType<typeof setInterval> | undefined;
+  const runScheduledRefresh = (): void => {
+    void app.refreshAll(true, true).then(async (summary) => {
+      await notifyCatalogChanges(summary.changes);
+      for (const failure of summary.failures) output.appendLine(`[${new Date().toISOString()}] 定时刷新失败 渠道=${failure.channelName} 类别=${failure.message}`);
+    }).catch((error: unknown) => {
+      output.appendLine(`[${new Date().toISOString()}] 定时刷新失败 类别=${error instanceof Error ? error.name : 'unknown'}`);
+    });
+  };
+  const syncRefreshTimer = (): void => {
+    const hasEnabledChannels = storage.getChannels().some((channel) => channel.enabled);
+    if (hasEnabledChannels && !refreshTimer) {
+      refreshTimer = setInterval(runScheduledRefresh, 60_000);
+    } else if (!hasEnabledChannels && refreshTimer) {
+      clearInterval(refreshTimer);
+      refreshTimer = undefined;
+    }
+  };
+  syncRefreshTimer();
+  context.subscriptions.push(
+    app.onDidChange(() => syncRefreshTimer()),
+    { dispose: () => { if (refreshTimer) clearInterval(refreshTimer); } },
+  );
 }
 
 export function deactivate(): void {}

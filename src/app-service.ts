@@ -45,12 +45,15 @@ export class AppService implements vscode.Disposable {
   }
 
   async getDashboardState(): Promise<DashboardState> {
+    const readOnly = this.storage.isReadOnly();
     return {
       channels: await Promise.all(this.storage.getChannels().map(async (channel) => ({ ...channel, hasCredential: await this.storage.hasApiKey(channel.id) }))),
       models: this.storage.getModels(),
       chatBindings: this.chatBindings.getSelections(),
       chatErrors: this.storage.getChatApplicationErrors(),
       sync: this.sync.getStatus(),
+      readOnly,
+      ...(readOnly ? { readOnlyReason: this.storage.getLastError() } : {}),
     };
   }
 
