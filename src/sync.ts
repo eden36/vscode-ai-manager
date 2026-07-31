@@ -230,16 +230,17 @@ export class SyncService {
     const protocol = preference?.metadataOverridden ? preference.protocol : model.protocol;
     const providerId = channel ? createModelProviderId(channel, model.id, protocol) : model.providerId;
     if (!preference) return { ...model, providerId };
+    const enabled = Boolean(channel && getProtocolPath(channel, protocol) && preference.enabled);
     return {
       ...model,
       providerId,
       customAlias: preference.customAlias,
-      enabled: Boolean(channel && getProtocolPath(channel, protocol) && preference.enabled),
+      enabled,
+      toolCalling: enabled,
       ...(preference.metadataOverridden ? {
         protocol,
         maxInputTokens: preference.maxInputTokens,
         maxOutputTokens: preference.maxOutputTokens,
-        toolCalling: preference.toolCalling,
         metadataOverridden: true,
       } : {}),
     };

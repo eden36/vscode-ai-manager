@@ -111,7 +111,6 @@ describe('AppService', () => {
       protocol: 'anthropic',
       maxInputTokens: 128_000,
       maxOutputTokens: 8_192,
-      toolCalling: true,
     });
 
     expect(models[0]).toMatchObject({
@@ -119,6 +118,20 @@ describe('AppService', () => {
       maxInputTokens: 128_000,
       metadataOverridden: false,
     });
+  });
+
+  it('启用模型时同步声明工具调用能力', async () => {
+    let models = [model({ enabled: false, toolCalling: false })];
+    const storage = {
+      getChannels: () => [channel()],
+      updateModels: async (update: (value: typeof models) => typeof models) => { models = update(models); return models; },
+    };
+    const sync = { saveProfileFromLocal: async () => undefined };
+    const app = new AppService(storage as any, {} as any, { reconcile: vi.fn() } as any, sync as any);
+
+    await app.saveModel({ channelId: 'channel-1', id: 'model-1', enabled: true });
+
+    expect(models[0]).toMatchObject({ enabled: true, toolCalling: true });
   });
 
   it('getDashboardState 暴露只读状态', async () => {

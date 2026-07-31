@@ -40,7 +40,6 @@ interface SaveModelPayload {
   protocol?: string;
   maxInputTokens?: number;
   maxOutputTokens?: number;
-  toolCalling?: boolean;
 }
 
 const SYNC_CREDENTIAL_NOTICE = 'API Key 将存入本机加密保险库。若你已启用 VS Code Settings Sync，凭据会随同步数据传播到同一账号的其他设备与 Profile。安全边界依赖 VS Code 账号与 Settings Sync 加密，而非用户主密码。是否继续保存？';
@@ -69,8 +68,13 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
     view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'media')] };
     view.webview.html = this.html(view.webview);
     view.webview.onDidReceiveMessage((message: WebviewMessage) => {
-      this.messageQueue = this.messageQueue.then(() => this.handleMessage(message));
+      this.messageQueue = this.messageQueue
+        .then(() => this.handleMessage(message))
+        .catch((error: unknown) => {
+          void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'AI Manager 面板操作失败');
+        });
     });
+    void this.sendState();
   }
 
   private async handleMessage(message: WebviewMessage): Promise<void> {
@@ -158,7 +162,6 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
             ...(payload.protocol !== undefined ? { protocol: payload.protocol as ModelProtocol } : {}),
             ...(payload.maxInputTokens !== undefined ? { maxInputTokens: payload.maxInputTokens } : {}),
             ...(payload.maxOutputTokens !== undefined ? { maxOutputTokens: payload.maxOutputTokens } : {}),
-            ...(payload.toolCalling !== undefined ? { toolCalling: payload.toolCalling } : {}),
           });
           break;
         }
@@ -275,7 +278,7 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
     </section>
     <section id="chat" class="page" aria-labelledby="chat-heading">
       <h1 id="chat-heading">Chat 绑定</h1>
-      <form id="chat-form" class="card form-card">
+      <div id="chat-form" class="card form-card">
         ${chatBindingPicker()}
         ${chatBindingRow('chat-default', '用于新建主 Chat 和 Agent 会话；当前会话中手动选择的模型不会被覆盖。')}
         ${chatBindingRow('inline-chat', '用于在编辑器中通过 Ctrl+I 打开的就地聊天。')}
@@ -284,8 +287,7 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
         ${chatBindingRow('utility', '用于 Chat 的通用辅助任务，例如整理上下文和生成辅助内容。')}
         ${chatBindingRow('utility-small', '用于更轻量、强调响应速度的 Chat 辅助任务。')}
         <p class="muted">保持原设置的项目不会被修改。所选模型失效时会恢复首次绑定前的用户级设置。</p>
-        <button type="submit" class="primary">应用设置</button>
-      </form>
+      </div>
     </section>
   </main>
   <script nonce="${nonce}" src="${script}"></script>

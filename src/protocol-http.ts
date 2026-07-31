@@ -2,8 +2,38 @@ import * as vscode from 'vscode';
 import type { ChannelConfig, ModelProtocol, ResolvedCandidate } from './types';
 import { getProtocolPath } from './models';
 
-export function apiKeyHeaders(channel: ChannelConfig, apiKey: string | undefined): Record<string, string> {
+export function isOpenCodeHostname(hostname: string): boolean {
+  return hostname === 'opencode.ai' || hostname.endsWith('.opencode.ai');
+}
+
+function usesOpenCodeHostname(channel: ChannelConfig): boolean {
+  try {
+    return isOpenCodeHostname(new URL(channel.baseUrl).hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function usesAnthropicApiKeyAuth(channel: ChannelConfig): boolean {
+  if (channel.authMode === 'anthropic-api-key') return true;
+  if (channel.preset === 'opencode-go' || channel.preset === 'opencode-console') return true;
+  return usesOpenCodeHostname(channel);
+}
+
+export function usesGoogleApiKeyAuth(channel: ChannelConfig): boolean {
+  if (channel.authMode === 'google-api-key') return true;
+  if (channel.preset === 'opencode-go' || channel.preset === 'opencode-console') return true;
+  return usesOpenCodeHostname(channel);
+}
+
+export function apiKeyHeaders(channel: ChannelConfig, apiKey: string | undefined, protocol: ModelProtocol = 'openai'): Record<string, string> {
   if (!apiKey) return {};
+  if (protocol === 'anthropic' && usesAnthropicApiKeyAuth(channel)) {
+    return { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' };
+  }
+  if (protocol === 'gemini' && usesGoogleApiKeyAuth(channel)) {
+    return { 'x-goog-api-key': apiKey };
+  }
   if (channel.authMode === 'anthropic-api-key') return { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' };
   if (channel.authMode === 'google-api-key') return { 'x-goog-api-key': apiKey };
   return { Authorization: `Bearer ${apiKey}` };

@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
-import { classifyHttpError, RequestError } from './errors';
+import { classifyHttpError, readHttpErrorDetail, RequestError } from './errors';
+import { extractMessageText, normalizeMessageRole } from './message-roles';
 import type { StreamResult } from './openai-client';
+import { openAiToolParameters } from './openai-client';
 import { apiKeyHeaders, createRequestControl, parseSseEvent, protocolUrl } from './protocol-http';
 import type { ResolvedCandidate } from './types';
 
@@ -8,12 +10,22 @@ const SIGNATURE_MIME = 'application/vnd.ai-manager.gemini-tool-signature+json';
 
 interface GeminiPart { text?: string; functionCall?: { name: string; args: object }; functionResponse?: { name: string; response: object }; thoughtSignature?: string }
 
-export function convertGeminiMessages(messages: readonly vscode.LanguageModelChatRequestMessage[]): Array<{ role: 'user' | 'model'; parts: GeminiPart[] }> {
+export function convertGeminiMessages(messages: readonly vscode.LanguageModelChatRequestMessage[]): {
+  systemInstruction?: { parts: Array<{ text: string }> };
+  contents: Array<{ role: 'user' | 'model'; parts: GeminiPart[] }>;
+} {
   const callNames = new Map<string, string>();
   for (const message of messages) for (const part of message.content) if (part instanceof vscode.LanguageModelToolCallPart) callNames.set(part.callId, part.name);
   const result: Array<{ role: 'user' | 'model'; parts: GeminiPart[] }> = [];
+  const systemParts: string[] = [];
   for (const message of messages) {
-    const role = message.role === vscode.LanguageModelChatMessageRole.Assistant ? 'model' : 'user';
+    const normalizedRole = normalizeMessageRole(message);
+    if (normalizedRole === 'system') {
+      const text = extractMessageText(message);
+      if (text) systemParts.push(text);
+      continue;
+    }
+    const role = normalizedRole === 'assistant' ? 'model' : 'user';
     const signatures = new Map<string, string>();
     for (const part of message.content) {
       if (!(part instanceof vscode.LanguageModelDataPart) || part.mimeType !== SIGNATURE_MIME) continue;
@@ -36,14 +48,24 @@ export function convertGeminiMessages(messages: readonly vscode.LanguageModelCha
     if (previous?.role === role) previous.parts.push(...parts);
     else result.push({ role, parts });
   }
-  return result;
+  return {
+    ...(systemParts.length > 0 ? { systemInstruction: { parts: [{ text: systemParts.join('\n\n') }] } } : {}),
+    contents: result,
+  };
 }
 
 export class GeminiClient {
   async streamChat(target: ResolvedCandidate, apiKey: string | undefined, messages: readonly vscode.LanguageModelChatRequestMessage[], options: vscode.ProvideLanguageModelChatResponseOptions, progress: vscode.Progress<vscode.LanguageModelResponsePart>, token: vscode.CancellationToken): Promise<StreamResult> {
-    const declarations = options.tools?.map((tool) => ({ name: tool.name, description: tool.description, parametersJsonSchema: tool.inputSchema ?? {} }));
+    const converted = convertGeminiMessages(messages);
+    if (converted.contents.length === 0) throw new RequestError('请求消息为空', 'invalid-request');
+    const declarations = options.tools?.map((tool) => ({
+      name: tool.name,
+      description: tool.description ?? tool.name,
+      parametersJsonSchema: openAiToolParameters(tool.inputSchema),
+    }));
     const body = {
-      contents: convertGeminiMessages(messages),
+      contents: converted.contents,
+      ...(converted.systemInstruction ? { systemInstruction: converted.systemInstruction } : {}),
       generationConfig: { maxOutputTokens: target.model.maxOutputTokens },
       ...(declarations?.length ? {
         tools: [{ functionDeclarations: declarations }],
@@ -59,9 +81,9 @@ async function streamGeminiRequest(target: ResolvedCandidate, apiKey: string | u
   let responseStarted = false;
   let streamed = false;
   try {
-    const response = await fetch(protocolUrl(target, 'gemini'), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...apiKeyHeaders(target.channel, apiKey) }, body: JSON.stringify(body), signal: request.controller.signal });
+    const response = await fetch(protocolUrl(target, 'gemini'), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...apiKeyHeaders(target.channel, apiKey, 'gemini') }, body: JSON.stringify(body), signal: request.controller.signal });
     request.armTimeout();
-    if (!response.ok) throw classifyHttpError(response.status);
+    if (!response.ok) throw classifyHttpError(response.status, await readHttpErrorDetail(response));
     if (!response.body) throw new RequestError('渠道未返回响应流', 'network');
     const seenCalls = new Set<string>();
     const consume = (raw: string): void => {

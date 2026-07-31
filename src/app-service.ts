@@ -22,7 +22,6 @@ interface SaveModelInput {
   protocol?: ModelProtocol;
   maxInputTokens?: number;
   maxOutputTokens?: number;
-  toolCalling?: boolean;
 }
 
 export class AppService implements vscode.Disposable {
@@ -175,15 +174,14 @@ export class AppService implements vscode.Disposable {
       if (!channel || !getProtocolPath(channel, protocol)) enabled = false;
       const customAlias = input.customAlias === undefined ? model.customAlias : input.customAlias.trim() || undefined;
       if (customAlias && customAlias.length > 80) throw new Error('模型别名不能超过 80 个字符');
-      const metadataChanged = input.protocol !== undefined || input.maxInputTokens !== undefined || input.maxOutputTokens !== undefined || input.toolCalling !== undefined;
+      const metadataChanged = input.protocol !== undefined || input.maxInputTokens !== undefined || input.maxOutputTokens !== undefined;
       const maxInputTokens = input.maxInputTokens === undefined ? model.maxInputTokens : this.boundedInteger(input.maxInputTokens, 1_024, 10_000_000, '输入上限');
       const maxOutputTokens = input.maxOutputTokens === undefined ? model.maxOutputTokens : this.boundedInteger(input.maxOutputTokens, 256, 1_000_000, '输出上限');
-      const toolCalling = input.toolCalling ?? model.toolCalling;
+      const toolCalling = enabled;
       const baseline = catalogMetadataBaseline(model);
       const matchesCatalog = protocol === baseline.protocol
         && maxInputTokens === baseline.maxInputTokens
-        && maxOutputTokens === baseline.maxOutputTokens
-        && toolCalling === baseline.toolCalling;
+        && maxOutputTokens === baseline.maxOutputTokens;
       const updated: CatalogModel = {
         ...model,
         customAlias,

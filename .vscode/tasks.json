@@ -13,6 +13,23 @@
       }
     },
     {
+      "label": "launch-vscode-dev-host-debug",
+      "dependsOn": [
+        "npm: build"
+      ],
+      "type": "shell",
+      "command": "node scripts/launch-vscode-dev-host-debug.mjs",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared",
+        "close": true
+      }
+    },
+    {
       "label": "在 VS Code 中启动扩展",
       "type": "npm",
       "script": "dev:vscode",

@@ -1,4 +1,4 @@
-import type { CatalogModel, ChannelConfig, ChatModelTarget, ChatSettingKey, DashboardState } from '../types';
+import type { CatalogModel, ChannelConfig, ChatSettingKey, DashboardState } from '../types';
 import type { ChatSettingSelections } from '../chat-settings';
 import { createChannelDefaults, isChannelPreset, PRESET_VALUES } from '../presets';
 import { catalogMetadataBaseline } from '../catalog-metadata';
@@ -445,7 +445,7 @@ function renderModelRow(channel: ChannelConfig, model: CatalogModel): HTMLElemen
   top.append(nameRow, aliasRow, enabledRow);
   const metadata = document.createElement('div');
   metadata.className = 'muted';
-  metadata.textContent = `${model.protocol} · ${model.available ? '可用' : '目录中已消失'} · ${model.maxInputTokens}/${model.maxOutputTokens} tokens · ${model.toolCalling ? '支持工具' : '未声明工具'}`;
+  metadata.textContent = `${model.protocol} · ${model.available ? '可用' : '目录中已消失'} · ${model.maxInputTokens}/${model.maxOutputTokens} tokens`;
   const editMetadata = button('编辑元数据', () => openModelEditor(model));
   if (isReadOnly()) editMetadata.disabled = true;
   row.append(top, metadata, editMetadata);
@@ -565,21 +565,13 @@ function openModelEditor(model: CatalogModel): void {
   }
   protocol.value = current.protocol;
   protocolLabel.append(protocol);
-  const toolsLabel = document.createElement('label');
-  toolsLabel.className = 'checkbox';
-  const tools = document.createElement('input');
-  tools.type = 'checkbox';
-  tools.checked = current.toolCalling;
-  toolsLabel.append(tools, document.createTextNode('支持工具调用'));
   const differsFromBaseline = (): boolean => protocol.value !== baseline.protocol
     || Number(inputLabel.input.value) !== baseline.maxInputTokens
-    || Number(outputLabel.input.value) !== baseline.maxOutputTokens
-    || tools.checked !== baseline.toolCalling;
+    || Number(outputLabel.input.value) !== baseline.maxOutputTokens;
   const restoreForm = (): void => {
     protocol.value = baseline.protocol;
     inputLabel.input.value = String(baseline.maxInputTokens);
     outputLabel.input.value = String(baseline.maxOutputTokens);
-    tools.checked = baseline.toolCalling;
     updateRestoreState();
   };
   const actions = document.createElement('div');
@@ -593,15 +585,14 @@ function openModelEditor(model: CatalogModel): void {
   const save = button('保存', () => undefined, 'primary');
   save.type = 'submit';
   actions.append(restore, save, button('取消', () => container.replaceChildren()));
-  form.append(heading, protocolLabel, inputLabel.label, outputLabel.label, toolsLabel, actions);
+  form.append(heading, protocolLabel, inputLabel.label, outputLabel.label, actions);
   protocol.addEventListener('change', updateRestoreState);
   inputLabel.input.addEventListener('input', updateRestoreState);
   outputLabel.input.addEventListener('input', updateRestoreState);
-  tools.addEventListener('change', updateRestoreState);
   updateRestoreState();
   form.addEventListener('submit', (event) => {
     event.preventDefault();
-    send('saveModel', { channelId: model.channelId, id: model.id, protocol: protocol.value, maxInputTokens: Number(inputLabel.input.value), maxOutputTokens: Number(outputLabel.input.value), toolCalling: tools.checked });
+    send('saveModel', { channelId: model.channelId, id: model.id, protocol: protocol.value, maxInputTokens: Number(inputLabel.input.value), maxOutputTokens: Number(outputLabel.input.value) });
     container.replaceChildren();
   });
   container.replaceChildren(form);
@@ -683,8 +674,29 @@ document.addEventListener('mousedown', (event) => {
 byId<HTMLDivElement>('chat-binding-picker-options').addEventListener('mousedown', (event) => event.preventDefault());
 
 for (const row of chatRows) {
-  byId<HTMLSelectElement>(`${row.prefix}-channel`).addEventListener('change', () => fillModelPicker(row.prefix));
+  byId<HTMLSelectElement>(`${row.prefix}-channel`).addEventListener('change', () => {
+    fillModelPicker(row.prefix);
+    applyChatBindingRow(row);
+  });
+  byId<HTMLSelectElement>(`${row.prefix}-model`).addEventListener('change', () => applyChatBindingRow(row));
   byId<HTMLButtonElement>(`${row.prefix}-restore`).addEventListener('click', () => send('restoreChatSetting', { setting: row.key }));
+}
+
+function applyChatBindingRow(row: typeof chatRows[number]): void {
+  if (isReadOnly()) {
+    send('showError', { message: state.readOnlyReason ?? '共享状态为只读，无法应用 Chat 设置' });
+    return;
+  }
+  const channelId = value(`${row.prefix}-channel`);
+  const modelId = value(`${row.prefix}-model`);
+  const current = state.chatBindings[row.key];
+  if (!channelId) {
+    if (current) send('restoreChatSetting', { setting: row.key });
+    return;
+  }
+  if (!modelId) return;
+  if (current?.channelId === channelId && current.modelId === modelId) return;
+  send('applyChatSettings', { [row.field]: { channelId, modelId } });
 }
 
 function renderChatBindings(): void {
@@ -715,7 +727,6 @@ function renderChatBindings(): void {
   showChatBinding(selectedChatBindingPrefix);
   chatBindingsRendered = true;
   const readOnly = isReadOnly();
-  byId<HTMLFormElement>('chat-form').querySelector<HTMLButtonElement>('button.primary')!.disabled = readOnly;
   for (const row of chatRows) {
     byId<HTMLSelectElement>(`${row.prefix}-channel`).disabled = readOnly;
     byId<HTMLSelectElement>(`${row.prefix}-model`).disabled = readOnly || !value(`${row.prefix}-channel`);
@@ -747,33 +758,6 @@ function eligibleModels(channelId: string): CatalogModel[] {
     .filter((model) => model.channelId === channelId && model.enabled && model.available && protocolConfigured(state.channels.find((channel) => channel.id === channelId)!, model.protocol))
     .sort((left, right) => left.catalogOrder - right.catalogOrder || left.name.localeCompare(right.name));
 }
-
-byId<HTMLFormElement>('chat-form').addEventListener('submit', (event) => {
-  event.preventDefault();
-  if (isReadOnly()) {
-    send('showError', { message: state.readOnlyReason ?? '共享状态为只读，无法应用 Chat 设置' });
-    return;
-  }
-  const payload: Record<string, ChatModelTarget> = {};
-  for (const row of chatRows) {
-    const channelId = value(`${row.prefix}-channel`);
-    const modelId = value(`${row.prefix}-model`);
-    if (channelId && !modelId) {
-      send('showError', { message: '选择渠道后还需要选择对应模型' });
-      return;
-    }
-    if (channelId && modelId) payload[row.field] = { channelId, modelId };
-  }
-  if (Object.keys(payload).length === 0) {
-    const activeRow = chatRows.find((row) => row.prefix === selectedChatBindingPrefix);
-    if (activeRow && state.chatBindings[activeRow.key]) {
-      send('restoreChatSetting', { setting: activeRow.key });
-      return;
-    }
-    return;
-  }
-  send('applyChatSettings', payload);
-});
 
 function renderSyncBanner(): void {
   const banner = byId('sync-banner');

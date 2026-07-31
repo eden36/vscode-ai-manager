@@ -28,8 +28,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await runStartupStep('同步初始化', () => sync.initialize());
   const catalog = new CatalogService(storage, sync);
   const chatBindings = new ChatBindingService(storage);
-  await runStartupStep('Chat 设置初始化', () => chatBindings.initialize());
-  await runStartupStep('同步状态发布', () => sync.saveProfileFromLocal());
   const app = new AppService(storage, catalog, chatBindings, sync);
   const dashboard = new DashboardWebviewProvider(context.extensionUri, app, chatBindings, storage);
   const languageProvider = new AiManagerLanguageProvider(app, output);
@@ -41,8 +39,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     dashboard,
     languageProvider,
     chatBindings,
-    vscode.window.registerWebviewViewProvider('aiManager.dashboard', dashboard),
     vscode.lm.registerLanguageModelChatProvider('ai-manager', languageProvider),
+    vscode.window.registerWebviewViewProvider('aiManager.dashboard', dashboard),
     vscode.commands.registerCommand('aiManager.open', () => vscode.commands.executeCommand('workbench.view.extension.aiManager')),
     vscode.commands.registerCommand('aiManager.showLogs', () => output.show()),
     vscode.commands.registerCommand('aiManager.refreshAll', async () => {
@@ -69,6 +67,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void vscode.window.showInformationMessage('同步凭据已重置。');
     }),
   );
+
+  await runStartupStep('Chat 设置初始化', () => chatBindings.initialize());
+  await runStartupStep('同步状态发布', () => sync.saveProfileFromLocal());
 
   context.subscriptions.push(storage.onDidChange((change) => {
     void (async () => {

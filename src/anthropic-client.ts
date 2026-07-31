@@ -1,18 +1,30 @@
 import * as vscode from 'vscode';
-import { classifyHttpError, RequestError } from './errors';
+import { classifyHttpError, readHttpErrorDetail, RequestError } from './errors';
 import { apiKeyHeaders, createRequestControl, parseSseEvent, protocolUrl } from './protocol-http';
 import type { ResolvedCandidate } from './types';
+import { extractMessageText, normalizeMessageRole } from './message-roles';
 import type { StreamResult } from './openai-client';
+import { openAiToolParameters } from './openai-client';
 
 type AnthropicBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: object }
   | { type: 'tool_result'; tool_use_id: string; content: string };
 
-export function convertAnthropicMessages(messages: readonly vscode.LanguageModelChatRequestMessage[]): Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> {
+export function convertAnthropicMessages(messages: readonly vscode.LanguageModelChatRequestMessage[]): {
+  system?: string;
+  messages: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }>;
+} {
   const converted: Array<{ role: 'user' | 'assistant'; content: AnthropicBlock[] }> = [];
+  const systemParts: string[] = [];
   for (const message of messages) {
-    const role = message.role === vscode.LanguageModelChatMessageRole.Assistant ? 'assistant' : 'user';
+    const role = normalizeMessageRole(message);
+    if (role === 'system') {
+      const text = extractMessageText(message);
+      if (text) systemParts.push(text);
+      continue;
+    }
+    const chatRole = role === 'assistant' ? 'assistant' : 'user';
     const content: AnthropicBlock[] = [];
     for (const part of message.content) {
       if (part instanceof vscode.LanguageModelTextPart && part.value) content.push({ type: 'text', text: part.value });
@@ -24,20 +36,30 @@ export function convertAnthropicMessages(messages: readonly vscode.LanguageModel
     }
     if (!content.length) continue;
     const previous = converted.at(-1);
-    if (previous?.role === role) previous.content.push(...content);
-    else converted.push({ role, content });
+    if (previous?.role === chatRole) previous.content.push(...content);
+    else converted.push({ role: chatRole, content });
   }
-  return converted;
+  return {
+    ...(systemParts.length > 0 ? { system: systemParts.join('\n\n') } : {}),
+    messages: converted,
+  };
 }
 
 export class AnthropicClient {
   async streamChat(target: ResolvedCandidate, apiKey: string | undefined, messages: readonly vscode.LanguageModelChatRequestMessage[], options: vscode.ProvideLanguageModelChatResponseOptions, progress: vscode.Progress<vscode.LanguageModelResponsePart>, token: vscode.CancellationToken): Promise<StreamResult> {
-    const tools = options.tools?.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema ?? {} }));
+    const converted = convertAnthropicMessages(messages);
+    if (converted.messages.length === 0) throw new RequestError('请求消息为空', 'invalid-request');
+    const tools = options.tools?.map((tool) => ({
+      name: tool.name,
+      description: tool.description ?? tool.name,
+      input_schema: openAiToolParameters(tool.inputSchema),
+    }));
     return streamAnthropicRequest(target, apiKey, {
       model: target.model.id,
       max_tokens: target.model.maxOutputTokens,
-      messages: convertAnthropicMessages(messages),
+      messages: converted.messages,
       stream: true,
+      ...(converted.system ? { system: converted.system } : {}),
       ...(tools?.length ? { tools, tool_choice: { type: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'any' : 'auto' } } : {}),
     }, progress, token);
   }
@@ -50,11 +72,11 @@ async function streamAnthropicRequest(target: ResolvedCandidate, apiKey: string 
   try {
     const response = await fetch(protocolUrl(target, 'anthropic'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', 'anthropic-version': '2023-06-01', ...apiKeyHeaders(target.channel, apiKey) },
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', 'anthropic-version': '2023-06-01', ...apiKeyHeaders(target.channel, apiKey, 'anthropic') },
       body: JSON.stringify(body), signal: request.controller.signal,
     });
     request.armTimeout();
-    if (!response.ok) throw classifyHttpError(response.status);
+    if (!response.ok) throw classifyHttpError(response.status, await readHttpErrorDetail(response));
     if (!response.body) throw new RequestError('渠道未返回响应流', 'network');
     const calls = new Map<number, { id: string; name: string; json: string }>();
     const consume = (raw: string): void => {

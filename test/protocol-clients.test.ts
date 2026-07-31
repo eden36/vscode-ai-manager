@@ -19,6 +19,7 @@ vi.mock('vscode', () => {
 });
 
 import * as vscode from 'vscode';
+import { apiKeyHeaders, isOpenCodeHostname, usesAnthropicApiKeyAuth, usesGoogleApiKeyAuth } from '../src/protocol-http';
 import { AnthropicClient, convertAnthropicMessages } from '../src/anthropic-client';
 import { convertGeminiMessages, GeminiClient } from '../src/gemini-client';
 import { channel, model } from './fixtures';
@@ -31,7 +32,39 @@ function eventResponse(events: Array<{ event?: string; data: unknown }>): Respon
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
+describe('protocol-http auth', () => {
+  it('仅匹配 opencode.ai 及其子域', () => {
+    expect(isOpenCodeHostname('opencode.ai')).toBe(true);
+    expect(isOpenCodeHostname('console.opencode.ai')).toBe(true);
+    expect(isOpenCodeHostname('evilopencode.ai')).toBe(false);
+    expect(isOpenCodeHostname('notopencode.ai')).toBe(false);
+  });
+
+  it('自定义渠道仅在 OpenCode 主机名上使用协议专用认证头', () => {
+    const opencodeHost = channel({ preset: 'custom', baseUrl: 'https://console.opencode.ai' });
+    const otherHost = channel({ preset: 'custom', baseUrl: 'https://evilopencode.ai' });
+    expect(usesAnthropicApiKeyAuth(opencodeHost)).toBe(true);
+    expect(usesGoogleApiKeyAuth(opencodeHost)).toBe(true);
+    expect(usesAnthropicApiKeyAuth(otherHost)).toBe(false);
+    expect(usesGoogleApiKeyAuth(otherHost)).toBe(false);
+    expect(apiKeyHeaders(otherHost, 'secret', 'anthropic')).toEqual({ Authorization: 'Bearer secret' });
+  });
+});
+
 describe('AnthropicClient', () => {
+  it('OpenCode Go 的 Anthropic 端点使用 x-api-key 认证', () => {
+    expect(apiKeyHeaders(channel({ preset: 'opencode-go' }), 'secret', 'anthropic')).toEqual({
+      'x-api-key': 'secret',
+      'anthropic-version': '2023-06-01',
+    });
+    expect(apiKeyHeaders(channel({ preset: 'opencode-go' }), 'secret', 'openai')).toEqual({
+      Authorization: 'Bearer secret',
+    });
+    expect(apiKeyHeaders(channel({ preset: 'opencode-go' }), 'secret', 'gemini')).toEqual({
+      'x-goog-api-key': 'secret',
+    });
+  });
+
   it('转换消息并解析文本和流式工具调用', async () => {
     const target = { channel: channel({ preset: 'opencode-go', anthropicPath: '/zen/go/v1/messages' }), model: model({ protocol: 'anthropic' }) };
     const fetchMock = vi.fn().mockResolvedValue(eventResponse([
@@ -41,11 +74,12 @@ describe('AnthropicClient', () => {
     ]));
     vi.stubGlobal('fetch', fetchMock);
     const parts: unknown[] = [];
-    await new AnthropicClient().streamChat(target, 'secret', [], { tools: [{ name: 'read_file', description: '读取', inputSchema: {} }] } as any, { report: (part) => parts.push(part) }, token as any);
+    await new AnthropicClient().streamChat(target, 'secret', [{ role: 1, name: undefined, content: [new vscode.LanguageModelTextPart('hi')] } as any], { tools: [{ name: 'read_file', description: '读取', inputSchema: {} }] } as any, { report: (part) => parts.push(part) }, token as any);
     expect(parts).toEqual([expect.objectContaining({ value: '你好' }), expect.objectContaining({ callId: 'call-1', name: 'read_file', input: { path: 'README.md' } })]);
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe('https://example.com/zen/go/v1/messages');
-    expect((init.headers as Record<string, string>)).toMatchObject({ Authorization: 'Bearer secret', 'anthropic-version': '2023-06-01' });
+    expect((init.headers as Record<string, string>)).toMatchObject({ 'x-api-key': 'secret', 'anthropic-version': '2023-06-01' });
+    expect((init.headers as Record<string, string>).Authorization).toBeUndefined();
   });
 
   it('将工具调用和结果转换为 Messages 内容块', () => {
@@ -53,14 +87,34 @@ describe('AnthropicClient', () => {
       { role: 2, content: [new vscode.LanguageModelToolCallPart('call-1', 'read_file', { path: 'a' })] } as any,
       { role: 1, content: [new vscode.LanguageModelToolResultPart('call-1', [new vscode.LanguageModelTextPart('ok')])] } as any,
     ]);
-    expect(result).toEqual([
+    expect(result.messages).toEqual([
       { role: 'assistant', content: [{ type: 'tool_use', id: 'call-1', name: 'read_file', input: { path: 'a' } }] },
       { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call-1', content: 'ok' }] },
+    ]);
+  });
+
+  it('将 System 角色消息提取到 system 字段', () => {
+    const result = convertAnthropicMessages([
+      { role: 3, content: [new vscode.LanguageModelTextPart('你是提交信息助手')] } as any,
+      { role: 1, content: [new vscode.LanguageModelTextPart('生成提交说明')] } as any,
+    ]);
+    expect(result.system).toBe('你是提交信息助手');
+    expect(result.messages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: '生成提交说明' }] },
     ]);
   });
 });
 
 describe('GeminiClient', () => {
+  it('OpenCode 的 Gemini 端点使用 x-goog-api-key 认证', () => {
+    expect(apiKeyHeaders(channel({ preset: 'opencode-go', geminiPath: '/zen/v1beta/models/{model}:streamGenerateContent?alt=sse' }), 'secret', 'gemini')).toEqual({
+      'x-goog-api-key': 'secret',
+    });
+    expect(apiKeyHeaders(channel({ preset: 'opencode-go' }), 'secret', 'openai')).toEqual({
+      Authorization: 'Bearer secret',
+    });
+  });
+
   it('解析文本、工具调用并输出可往返的思考签名', async () => {
     const target = { channel: channel({ authMode: 'google-api-key' }), model: model({ id: 'gemini-test', protocol: 'gemini' }) };
     const fetchMock = vi.fn().mockResolvedValue(eventResponse([{ data: { candidates: [{ content: { parts: [
@@ -69,11 +123,11 @@ describe('GeminiClient', () => {
     ] } }] } }]));
     vi.stubGlobal('fetch', fetchMock);
     const parts: any[] = [];
-    await new GeminiClient().streamChat(target, 'secret', [], {} as any, { report: (part) => parts.push(part) }, token as any);
+    await new GeminiClient().streamChat(target, 'secret', [{ role: 1, name: undefined, content: [new vscode.LanguageModelTextPart('hi')] } as any], {} as any, { report: (part) => parts.push(part) }, token as any);
     expect(parts[0]).toMatchObject({ value: '完成' });
     expect(parts[1]).toMatchObject({ name: 'read_file', input: { path: 'README.md' } });
     const converted = convertGeminiMessages([{ role: 2, content: [parts[1], parts[2]] } as any]);
-    expect(converted[0]?.parts[0]).toMatchObject({ functionCall: { name: 'read_file' }, thoughtSignature: 'signature-1' });
+    expect(converted.contents[0]?.parts[0]).toMatchObject({ functionCall: { name: 'read_file' }, thoughtSignature: 'signature-1' });
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe('https://example.com/v1beta/models/gemini-test:streamGenerateContent?alt=sse');
     expect((init.headers as Record<string, string>)['x-goog-api-key']).toBe('secret');
@@ -84,6 +138,15 @@ describe('GeminiClient', () => {
       { role: 2, content: [new vscode.LanguageModelToolCallPart('call-1', 'read_file', {})] } as any,
       { role: 1, content: [new vscode.LanguageModelToolResultPart('call-1', [new vscode.LanguageModelTextPart('ok')])] } as any,
     ]);
-    expect(result[1]?.parts[0]).toEqual({ functionResponse: { name: 'read_file', response: { result: 'ok' } } });
+    expect(result.contents[1]?.parts[0]).toEqual({ functionResponse: { name: 'read_file', response: { result: 'ok' } } });
+  });
+
+  it('将 System 角色消息提取到 systemInstruction', () => {
+    const result = convertGeminiMessages([
+      { role: 3, content: [new vscode.LanguageModelTextPart('你是提交信息助手')] } as any,
+      { role: 1, content: [new vscode.LanguageModelTextPart('生成提交说明')] } as any,
+    ]);
+    expect(result.systemInstruction).toEqual({ parts: [{ text: '你是提交信息助手' }] });
+    expect(result.contents).toEqual([{ role: 'user', parts: [{ text: '生成提交说明' }] }]);
   });
 });

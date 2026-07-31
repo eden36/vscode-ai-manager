@@ -23,6 +23,10 @@ export function isModelUsable(model: CatalogModel, channel: ChannelConfig | unde
   return Boolean(channel?.enabled && model.enabled && model.available && channel && getProtocolPath(channel, model.protocol));
 }
 
+export function modelReportsToolCalling(model: CatalogModel): boolean {
+  return model.enabled;
+}
+
 export function getProtocolPath(channel: ChannelConfig, protocol: ModelProtocol): string | undefined {
   if (protocol === 'openai') return channel.chatPath;
   if (protocol === 'anthropic') return channel.anthropicPath;

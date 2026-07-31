@@ -28,8 +28,7 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onView:aiManager.dashboard",
-    "onLanguageModelChatProvider:ai-manager"
+    "onStartupFinished"
   ],
   "contributes": {
     "viewsContainers": {

@@ -141,15 +141,17 @@ export class CatalogService {
           const old = previousById.get(model.id);
           const catalogMetadata = catalogMetadataFrom(model);
           const protocol = old?.metadataOverridden ? old.protocol : model.protocol;
+          const enabled = getProtocolPath(channel, protocol) ? old?.enabled ?? false : false;
           const stable = {
             ...model,
             catalogMetadata,
             providerId: createModelProviderId(channel, model.id, protocol),
             customAlias: old?.customAlias,
-            enabled: getProtocolPath(channel, protocol) ? old?.enabled ?? false : false,
+            enabled,
+            toolCalling: enabled,
           };
           const mergedModel = old?.metadataOverridden
-            ? { ...stable, protocol: old.protocol, maxInputTokens: old.maxInputTokens, maxOutputTokens: old.maxOutputTokens, toolCalling: old.toolCalling, metadataOverridden: true }
+            ? { ...stable, protocol: old.protocol, maxInputTokens: old.maxInputTokens, maxOutputTokens: old.maxOutputTokens, metadataOverridden: true }
             : stable;
           return this.sync?.applyPreference(mergedModel) ?? mergedModel;
         });

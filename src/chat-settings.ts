@@ -22,6 +22,8 @@ const SETTING_ENTRIES: Array<{ field: keyof ChatSettingSelections; key: ChatSett
   { field: 'utilitySmall', key: 'chat.utilitySmallModel', label: 'Chat: Utility Small Model' },
 ];
 
+const UTILITY_SETTINGS = new Set<ChatSettingKey>(['chat.utilityModel', 'chat.utilitySmallModel']);
+
 const QUALIFIED_MODEL_SETTINGS = new Set<ChatSettingKey>([
   'chat.defaultModel',
   'inlineChat.defaultModel',
@@ -97,12 +99,6 @@ export class ChatBindingService implements vscode.Disposable {
       if (!channel || !model || !isModelUsable(model, channel)) throw new Error(`${entry.label} 选择的模型当前不可用`);
       return { ...entry, channel, model };
     });
-    const confirmation = await vscode.window.showWarningMessage(
-      `将修改 ${resolved.map((entry) => entry.label).join('、')}，是否继续？`,
-      { modal: true },
-      '应用',
-    );
-    if (confirmation !== '应用') return;
 
     const configuration = vscode.workspace.getConfiguration();
     const originalBindings = this.storage.getChatBindings();
@@ -134,6 +130,11 @@ export class ChatBindingService implements vscode.Disposable {
         value: this.settingValue(entry.key, entry.channel, entry.model),
       })));
       for (const entry of resolved) await this.storage.saveChatApplicationError(entry.key, undefined);
+      this.scheduleRuntimeUtilityCheck(resolved.map((entry) => ({
+        key: entry.key,
+        label: entry.label,
+        model: entry.model,
+      })));
     } catch (error) {
       const failed = snapshots.at(-1);
       if (failed) await this.storage.saveChatApplicationError(
@@ -144,7 +145,6 @@ export class ChatBindingService implements vscode.Disposable {
       await this.restoreBindings(resolved.map((entry) => entry.key), originalBindings);
       throw error;
     }
-    void vscode.window.showInformationMessage(`已应用 ${resolved.length} 项 Chat 设置。`);
   }
 
   private async restoreInternal(setting: ChatSettingKey): Promise<void> {
@@ -152,12 +152,6 @@ export class ChatBindingService implements vscode.Disposable {
     const binding = bindings.find((item) => item.setting === setting);
     if (!binding) throw new Error('该设置当前没有 AI Manager 绑定');
     const entry = SETTING_ENTRIES.find((item) => item.key === setting)!;
-    const confirmation = await vscode.window.showWarningMessage(
-      `将恢复 ${entry.label} 的绑定前设置，是否继续？`,
-      { modal: true },
-      '恢复',
-    );
-    if (confirmation !== '恢复') return;
     const configuration = vscode.workspace.getConfiguration();
     const currentGlobalValue = configuration.inspect(setting)?.globalValue;
     let changed = false;
@@ -250,6 +244,35 @@ export class ChatBindingService implements vscode.Disposable {
     return QUALIFIED_MODEL_SETTINGS.has(setting)
       ? `${getModelDisplayName(model, channel)} (ai-manager)`
       : `ai-manager/${model.providerId}`;
+  }
+
+  private scheduleRuntimeUtilityCheck(
+    entries: Array<{ key: ChatSettingKey; label: string; model: CatalogModel }>,
+  ): void {
+    if (entries.every((entry) => !UTILITY_SETTINGS.has(entry.key))) return;
+    // 不能在扩展 activate / reconcile 期间调用 lm.selectChatModels，否则会与语言模型
+    // 提供方注册形成重入死锁，导致侧边栏 Webview 一直停在加载状态。
+    setTimeout(() => {
+      void this.verifyUtilityBindings(entries).catch(() => undefined);
+    }, 0);
+  }
+
+  private async verifyUtilityBindings(
+    entries: Array<{ key: ChatSettingKey; label: string; model: CatalogModel }>,
+  ): Promise<void> {
+    for (const entry of entries) {
+      if (!UTILITY_SETTINGS.has(entry.key)) continue;
+      let models: readonly vscode.LanguageModelChat[] = [];
+      try {
+        models = await vscode.lm.selectChatModels({ vendor: 'ai-manager', id: entry.model.providerId });
+      } catch {
+        // VS Code 在扩展尚未完成注册时可能抛错；按未解析处理。
+      }
+      if (models.length > 0) continue;
+      const message = `${entry.label} 已写入设置，但 VS Code 当前无法解析 ai-manager/${entry.model.providerId}。Git 提交信息生成等辅助功能可能不可用；请确认模型已启用，并在 AI Manager 中重新应用该绑定后重载窗口。`;
+      await this.storage.saveChatApplicationError(entry.key, message);
+      void vscode.window.showWarningMessage(message);
+    }
   }
 
   private async updateSetting(

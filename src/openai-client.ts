@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
-import { classifyHttpError, RequestError } from './errors';
+import { classifyHttpError, readHttpErrorDetail, RequestError } from './errors';
 import { joinEndpoint } from './catalog';
 import type { ResolvedCandidate } from './types';
+import { extractMessageText, normalizeMessageRole } from './message-roles';
 import { apiKeyHeaders, createRequestControl } from './protocol-http';
 
 interface OpenAIMessage {
-  role: 'user' | 'assistant' | 'tool';
+  role: 'user' | 'assistant' | 'system' | 'tool';
   content: string | null;
   tool_call_id?: string;
   tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>;
@@ -28,14 +29,15 @@ function textValue(part: unknown): string | undefined {
 export function convertMessages(messages: readonly vscode.LanguageModelChatRequestMessage[]): OpenAIMessage[] {
   const result: OpenAIMessage[] = [];
   for (const message of messages) {
-    const text = message.content.map(textValue).filter((value): value is string => value !== undefined).join('');
+    const role = normalizeMessageRole(message);
+    const text = extractMessageText(message);
     const toolResults = message.content.filter((part): part is vscode.LanguageModelToolResultPart => part instanceof vscode.LanguageModelToolResultPart);
     for (const toolResult of toolResults) {
       const content = (toolResult.content ?? []).map((part) => textValue(part) ?? JSON.stringify(part)).join('');
       result.push({ role: 'tool', tool_call_id: toolResult.callId ?? '', content });
     }
     const toolCalls = message.content.filter((part): part is vscode.LanguageModelToolCallPart => part instanceof vscode.LanguageModelToolCallPart);
-    if (message.role === vscode.LanguageModelChatMessageRole.Assistant) {
+    if (role === 'assistant') {
       result.push({
         role: 'assistant',
         content: text || null,
@@ -48,10 +50,34 @@ export function convertMessages(messages: readonly vscode.LanguageModelChatReque
         } : {}),
       });
     } else if (text) {
-      result.push({ role: 'user', content: text });
+      result.push({ role: role === 'system' ? 'system' : 'user', content: text });
     }
   }
   return result;
+}
+
+export function openAiToolParameters(schema: unknown): Record<string, unknown> {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+    return { type: 'object', properties: {} };
+  }
+  const value = schema as Record<string, unknown>;
+  if (value.properties && typeof value.properties === 'object' && !Array.isArray(value.properties)) {
+    return {
+      type: 'object',
+      properties: value.properties,
+      ...(Array.isArray(value.required) ? { required: value.required } : {}),
+      ...(value.additionalProperties !== undefined ? { additionalProperties: value.additionalProperties } : {}),
+    };
+  }
+  if (value.type === 'object') {
+    return {
+      type: 'object',
+      properties: {},
+      ...(Array.isArray(value.required) ? { required: value.required } : {}),
+      ...(value.additionalProperties !== undefined ? { additionalProperties: value.additionalProperties } : {}),
+    };
+  }
+  return { type: 'object', properties: {} };
 }
 
 export class OpenAIClient {
@@ -67,10 +93,26 @@ export class OpenAIClient {
     let streamed = false;
     let responseStarted = false;
     try {
+      const converted = convertMessages(messages);
+      if (converted.length === 0) throw new RequestError('请求消息为空', 'invalid-request');
       const tools = options.tools?.map((tool) => ({
-        type: 'function',
-        function: { name: tool.name, description: tool.description, parameters: tool.inputSchema ?? {} },
+        type: 'function' as const,
+        function: {
+          name: tool.name,
+          description: tool.description ?? tool.name,
+          parameters: openAiToolParameters(tool.inputSchema),
+        },
       }));
+      const body = {
+        model: target.model.id,
+        messages: converted,
+        stream: true,
+        max_tokens: target.model.maxOutputTokens,
+        ...(tools && tools.length > 0 ? {
+          tools,
+          tool_choice: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto',
+        } : {}),
+      };
       const response = await fetch(joinEndpoint(target.channel.baseUrl, target.channel.chatPath), {
         method: 'POST',
         headers: {
@@ -78,26 +120,19 @@ export class OpenAIClient {
           Accept: 'text/event-stream',
           ...apiKeyHeaders(target.channel, apiKey),
         },
-        body: JSON.stringify({
-          model: target.model.id,
-          messages: convertMessages(messages),
-          stream: true,
-          ...(tools && tools.length > 0 ? {
-            tools,
-            tool_choice: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto',
-          } : {}),
-        }),
+        body: JSON.stringify(body),
         signal: request.controller.signal,
       });
       request.armTimeout();
       if (!response.ok) {
+        const detail = await readHttpErrorDetail(response);
         if (response.status === 400) {
-          const errorCode = await response.clone().json().then((payload: any) => String(payload?.error?.code ?? payload?.error?.type ?? '')).catch(() => '');
+          const errorCode = detail ?? '';
           if (/model.*(not.*found|invalid|unavailable)/i.test(errorCode)) {
-            throw new RequestError('模型不可用（HTTP 400）', 'model-unavailable', 400, true);
+            throw new RequestError(`模型不可用（HTTP 400）${detail ? `: ${detail}` : ''}`, 'model-unavailable', 400, true);
           }
         }
-        throw classifyHttpError(response.status);
+        throw classifyHttpError(response.status, detail);
       }
       if (!response.body) throw new RequestError('渠道未返回响应流', 'network');
 

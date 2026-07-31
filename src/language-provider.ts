@@ -2,7 +2,8 @@ import * as vscode from 'vscode';
 import { OpenAIClient } from './openai-client';
 import { AnthropicClient } from './anthropic-client';
 import { GeminiClient } from './gemini-client';
-import { estimateTokens, getExposedModels, getModelDisplayName, isModelUsable } from './models';
+import { estimateTokens, getExposedModels, getModelDisplayName, isModelUsable, modelReportsToolCalling } from './models';
+import { safeErrorMessage, shouldNotifyLanguageModelFailure } from './errors';
 import type { AppService } from './app-service';
 
 export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvider, vscode.Disposable {
@@ -23,9 +24,13 @@ export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvid
     this.modelChangeEmitter.dispose();
   }
 
-  provideLanguageModelChatInformation(): vscode.ProviderResult<vscode.LanguageModelChatInformation[]> {
+  provideLanguageModelChatInformation(
+    options: vscode.PrepareLanguageModelChatModelOptions,
+    token: vscode.CancellationToken,
+  ): vscode.ProviderResult<vscode.LanguageModelChatInformation[]> {
+    if (token.isCancellationRequested) return [];
     const channels = this.app.storage.getChannels();
-    return getExposedModels(channels, this.app.storage.getModels()).flatMap((model) => {
+    const models = getExposedModels(channels, this.app.storage.getModels()).flatMap((model) => {
       const channel = channels.find((item) => item.id === model.channelId);
       if (!channel) return [];
       return [{
@@ -37,9 +42,13 @@ export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvid
         maxOutputTokens: model.maxOutputTokens,
         tooltip: `${channel.name} / ${model.name}`,
         detail: 'AI Manager 模型',
-        capabilities: { imageInput: false, toolCalling: model.toolCalling },
+        capabilities: { imageInput: false, toolCalling: modelReportsToolCalling(model) },
       }];
     });
+    if (!options.silent) {
+      this.output.appendLine(`[${new Date().toISOString()}] 已注册 ${models.length} 个可用模型`);
+    }
+    return models;
   }
 
   async provideLanguageModelChatResponse(
@@ -55,13 +64,22 @@ export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvid
     const startedAt = Date.now();
     try {
       const apiKey = await this.app.storage.getApiKey(channel.id);
+      if (!apiKey?.trim()) throw new Error(`${channel.name} 未配置 API Key，请在 AI Manager 中编辑渠道并保存密钥`);
       if (model.protocol === 'unknown') throw new Error('模型协议不受支持');
       const result = await this.clients[model.protocol].streamChat({ channel, model }, apiKey, messages, options, progress, token);
-      this.log(getModelDisplayName(model, channel), channel.name, model.id, Date.now() - startedAt, result.streamed ? 'success' : 'empty-response');
+      if (!result.streamed) {
+        const message = `${getModelDisplayName(model, channel)} 未返回有效内容，请检查模型或渠道配置`;
+        this.log(getModelDisplayName(model, channel), channel.name, model.id, Date.now() - startedAt, 'empty-response', undefined, message);
+        if (shouldNotifyLanguageModelFailure(options, new Error(message))) void vscode.window.showErrorMessage(message);
+        throw new Error(message);
+      }
+      this.log(getModelDisplayName(model, channel), channel.name, model.id, Date.now() - startedAt, 'success');
     } catch (error) {
+      const message = safeErrorMessage(error);
       const category = error instanceof Error && 'category' in error ? String(error.category) : 'unknown';
       const status = error instanceof Error && 'status' in error && typeof error.status === 'number' ? error.status : undefined;
-      this.log(getModelDisplayName(model, channel), channel.name, model.id, Date.now() - startedAt, category, status);
+      this.log(getModelDisplayName(model, channel), channel.name, model.id, Date.now() - startedAt, category, status, message);
+      if (shouldNotifyLanguageModelFailure(options, error)) void vscode.window.showErrorMessage(message);
       throw error;
     }
   }
@@ -77,7 +95,8 @@ export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvid
     }).join(''));
   }
 
-  private log(alias: string, channel: string, model: string, durationMs: number, category: string, status?: number): void {
-    this.output.appendLine(`[${new Date().toISOString()}] 渠道=${channel} 别名=${alias} 模型=${model} 耗时=${durationMs}ms${status ? ` 状态=${status}` : ''} 类别=${category}`);
+  private log(alias: string, channel: string, model: string, durationMs: number, category: string, status?: number, detail?: string): void {
+    const suffix = detail ? ` 详情=${detail}` : '';
+    this.output.appendLine(`[${new Date().toISOString()}] 渠道=${channel} 别名=${alias} 模型=${model} 耗时=${durationMs}ms${status ? ` 状态=${status}` : ''} 类别=${category}${suffix}`);
   }
 }

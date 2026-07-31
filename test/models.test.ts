@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createModelProviderId, estimateTokens, getExposedModels, getModelDisplayName, sortCatalogModels } from '../src/models';
+import { createModelProviderId, estimateTokens, getExposedModels, getModelDisplayName, modelReportsToolCalling, sortCatalogModels } from '../src/models';
 import { channel, model } from './fixtures';
 
 describe('模型显示与排序', () => {
@@ -35,6 +35,11 @@ describe('模型显示与排序', () => {
       model({ id: 'anthropic', protocol: 'anthropic' }),
     ]);
     expect(exposed.map((item) => item.id)).toEqual(['model-1', 'anthropic']);
+  });
+
+  it('仅对已启用模型声明工具调用能力', () => {
+    expect(modelReportsToolCalling(model({ enabled: true }))).toBe(true);
+    expect(modelReportsToolCalling(model({ enabled: false }))).toBe(false);
   });
 });
 
