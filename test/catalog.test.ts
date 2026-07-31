@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CatalogService, inferProtocol, joinEndpoint, parseModelCatalog } from '../src/catalog';
+import { CatalogService, catalogMetadataBaseline, inferProtocol, joinEndpoint, parseModelCatalog } from '../src/catalog';
 import { createModelProviderId } from '../src/models';
 import { createChannelDefaults } from '../src/presets';
 import type { ChannelPreset } from '../src/types';
@@ -58,6 +58,26 @@ describe('parseModelCatalog', () => {
   });
 });
 
+describe('catalogMetadataBaseline', () => {
+  it('优先使用目录基线元数据', () => {
+    expect(catalogMetadataBaseline(model({
+      protocol: 'openai',
+      maxInputTokens: 64_000,
+      catalogMetadata: {
+        protocol: 'anthropic',
+        maxInputTokens: 128_000,
+        maxOutputTokens: 8_192,
+        toolCalling: false,
+      },
+    }))).toEqual({
+      protocol: 'anthropic',
+      maxInputTokens: 128_000,
+      maxOutputTokens: 8_192,
+      toolCalling: false,
+    });
+  });
+});
+
 describe('joinEndpoint', () => {
   it('安全拼接接口地址', () => {
     expect(joinEndpoint('https://example.com/base', '/v1/models')).toBe('https://example.com/base/v1/models');
@@ -91,7 +111,17 @@ describe('CatalogService 目录合并', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'kept' }, { id: 'new' }, { id: 'back' }] }), { status: 200 })));
     const result = await new CatalogService(storage as any).refreshChannel('channel-1');
     expect(result.change).toMatchObject({ initialized: false, added: ['new'], removed: ['removed'], reappeared: ['back'] });
-    expect(models.find((item) => item.id === 'kept')).toMatchObject({ providerId: createModelProviderId(channel(), 'kept'), customAlias: '保留别名', enabled: true });
+    expect(models.find((item) => item.id === 'kept')).toMatchObject({
+      providerId: createModelProviderId(channel(), 'kept'),
+      customAlias: '保留别名',
+      enabled: true,
+      catalogMetadata: {
+        protocol: 'openai',
+        maxInputTokens: 128_000,
+        maxOutputTokens: 8_192,
+        toolCalling: false,
+      },
+    });
     expect(models.find((item) => item.id === 'new')).toMatchObject({ enabled: false, available: true });
     expect(models.find((item) => item.id === 'removed')).toMatchObject({ providerId: 'stable-removed', available: false });
     expect(models.find((item) => item.id === 'back')).toMatchObject({ providerId: createModelProviderId(channel(), 'back'), enabled: true, available: true });
@@ -111,6 +141,44 @@ describe('CatalogService 目录合并', () => {
     const result = await new CatalogService(storage as any).refreshChannel('channel-1');
     expect(result.change.removed).toEqual(['removed']);
     expect(models[0]?.available).toBe(false);
+  });
+
+  it('刷新时更新目录基线并保留用户覆盖的元数据', async () => {
+    let models = [model({
+      id: 'kept',
+      metadataOverridden: true,
+      protocol: 'openai',
+      maxInputTokens: 64_000,
+      catalogMetadata: {
+        protocol: 'anthropic',
+        maxInputTokens: 128_000,
+        maxOutputTokens: 8_192,
+        toolCalling: true,
+      },
+    })];
+    let channels = [channel()];
+    const storage = {
+      getChannels: () => channels,
+      getModels: () => models,
+      getApiKey: async () => undefined,
+      updateModels: async (update: (value: typeof models) => typeof models) => { models = update(models); return models; },
+      updateChannels: async (update: (value: typeof channels) => typeof channels) => { channels = update(channels); return channels; },
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: [{ id: 'kept', limits: { context: 200_000, output: 16_000 }, capabilities: { tools: true } }],
+    }), { status: 200 })));
+    await new CatalogService(storage as any).refreshChannel('channel-1');
+    expect(models[0]).toMatchObject({
+      metadataOverridden: true,
+      protocol: 'openai',
+      maxInputTokens: 64_000,
+      catalogMetadata: {
+        protocol: 'openai',
+        maxInputTokens: 200_000,
+        maxOutputTokens: 16_000,
+        toolCalling: true,
+      },
+    });
   });
 
   it('汇总全渠道刷新失败而不是静默丢弃', async () => {

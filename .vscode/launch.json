@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "运行 AI Manager",
+      "name": "在 Cursor 中调试",
       "type": "extensionHost",
       "request": "launch",
       "args": [

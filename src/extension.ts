@@ -58,6 +58,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (selections) return chatBindings.apply(selections);
       return vscode.commands.executeCommand('workbench.view.extension.aiManager');
     }),
+    vscode.commands.registerCommand('aiManager.resetSync', async () => {
+      if (await vscode.window.showWarningMessage(
+        '重置将清除共享保险库、当前 Profile 解密密钥和所有 API Key；渠道、模型和 Chat 设置仍保留在本机共享文件中。其他 Profile 和设备联网后也会清除凭据。此操作无法撤销，是否继续？',
+        { modal: true },
+        '重置同步凭据',
+      ) !== '重置同步凭据') return;
+      await app.resetSync();
+      app.notifyExternalChange();
+      void vscode.window.showInformationMessage('同步凭据已重置。');
+    }),
   );
 
   context.subscriptions.push(storage.onDidChange((change) => {
@@ -79,20 +89,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   if (startupFailures.length > 0) {
     void vscode.window.showWarningMessage(`AI Manager 启动未完成：${startupFailures[0]}。部分功能可能不可用，请打开 AI Manager 面板查看状态。`);
-  }
-
-  if (sync.getStatus().locked) {
-    void vscode.window.showInformationMessage('AI Manager 已收到同步的 API Key，请先输入同步主密码解锁。', '立即解锁').then(async (choice) => {
-      if (choice !== '立即解锁') return;
-      const password = await vscode.window.showInputBox({ prompt: '输入 AI Manager 同步主密码', password: true, ignoreFocusOut: true });
-      if (password === undefined) return;
-      try {
-        await app.unlockSync(password);
-        void vscode.window.showInformationMessage('AI Manager API Key 同步已解锁。');
-      } catch (error) {
-        void vscode.window.showErrorMessage(error instanceof Error ? error.message : 'API Key 同步解锁失败');
-      }
-    });
   }
 
   void app.refreshAll(false, true).then(async (summary) => {

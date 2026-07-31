@@ -1,6 +1,7 @@
 import type { CatalogModel, ChannelConfig, ChatModelTarget, ChatSettingKey, DashboardState } from '../types';
 import type { ChatSettingSelections } from '../chat-settings';
 import { createChannelDefaults, isChannelPreset, PRESET_VALUES } from '../presets';
+import { catalogMetadataBaseline } from '../catalog-metadata';
 
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void };
 
@@ -12,12 +13,14 @@ let state: DashboardState = {
   chatErrors: {},
   sync: { enabled: false, locked: false, hasVault: false, localShared: true, cloudState: 'waiting' },
 };
-const openModelChannels = new Set<string>();
+const selectedModelIds = new Map<string, string>();
+const modelSearchTerms = new Map<string, string>();
+let activeModelPickerChannelId: string | null = null;
+let modelPickerOverlay: HTMLElement | null = null;
+let modelPickerOptions: HTMLElement | null = null;
+let modelPickerListenersBound = false;
 let chatBindingsRendered = false;
 let lastStateRevision = -1;
-let syncOperationPending = false;
-
-const syncOperations = ['enableSync', 'unlockSync', 'changeSyncPassword', 'resetSync'];
 
 const byId = <T extends HTMLElement>(id: string): T => {
   const element = document.getElementById(id);
@@ -45,19 +48,8 @@ window.addEventListener('message', (event: MessageEvent) => {
   } else if (message.type === 'operationSucceeded') {
     if (message.operation === 'saveChannel') closeChannelDialog();
     if (message.operation === 'applyChatSettings' || message.operation === 'restoreChatSetting') chatBindingsRendered = false;
-    if (syncOperations.includes(message.operation ?? '')) {
-      syncOperationPending = false;
-      clearSyncPasswords();
-      renderSync();
-    }
-  } else if (message.type === 'operationCancelled' && syncOperations.includes(message.operation ?? '')) {
-    syncOperationPending = false;
-    renderSync();
   } else if (message.type === 'operationFailed' && message.operation === 'saveChannel') {
     byId<HTMLButtonElement>('save-channel').disabled = false;
-  } else if (message.type === 'operationFailed' && syncOperations.includes(message.operation ?? '')) {
-    syncOperationPending = false;
-    renderSync();
   }
 });
 
@@ -66,9 +58,13 @@ function send(type: string, payload?: unknown): void {
 }
 
 function render(): void {
+  renderSyncBanner();
   renderChannels();
   renderChatBindings();
-  renderSync();
+  if (activeModelPickerChannelId) {
+    refreshModelPickerOverlay();
+    syncModelPickerOverlay();
+  }
 }
 
 function button(text: string, onClick: () => void, className = ''): HTMLButtonElement {
@@ -93,6 +89,7 @@ function renderChannels(): void {
   for (const channel of state.channels) {
     const card = document.createElement('article');
     card.className = 'card';
+    card.dataset.channelId = channel.id;
     const header = document.createElement('div');
     header.className = 'card-header';
     const title = document.createElement('span');
@@ -131,71 +128,268 @@ function renderChannels(): void {
   }
 }
 
-function renderChannelModels(channel: ChannelConfig): HTMLElement {
-  const wrapper = document.createElement('details');
-  wrapper.className = 'models';
-  wrapper.open = openModelChannels.has(channel.id);
-  const allModels = state.models
-    .filter((model) => model.channelId === channel.id)
+function channelModels(channelId: string): CatalogModel[] {
+  return state.models
+    .filter((model) => model.channelId === channelId)
     .sort((left, right) => left.catalogOrder - right.catalogOrder || left.name.localeCompare(right.name));
-  const query = value('model-search').trim().toLocaleLowerCase();
-  const filter = value('model-filter');
-  const models = allModels.filter((model) => {
-    const matchesQuery = !query || `${model.name} ${model.customAlias ?? ''}`.toLocaleLowerCase().includes(query);
-    const matchesFilter = filter === 'all'
-      || filter === 'enabled' && model.enabled
-      || filter === 'disabled' && !model.enabled
-      || filter === 'available' && model.available
-      || filter === 'unavailable' && !model.available
-      || filter === 'openai' && model.protocol === 'openai'
-      || filter === 'anthropic' && model.protocol === 'anthropic'
-      || filter === 'gemini' && model.protocol === 'gemini'
-      || filter === 'unsupported' && !protocolConfigured(channel, model.protocol);
-    return matchesQuery && matchesFilter;
+}
+
+function sortModelsForPicker(models: CatalogModel[]): CatalogModel[] {
+  return [...models].sort((left, right) => {
+    if (left.enabled !== right.enabled) return left.enabled ? -1 : 1;
+    return left.catalogOrder - right.catalogOrder || left.name.localeCompare(right.name);
   });
-  const summary = document.createElement('summary');
-  const filtered = query || filter !== 'all';
-  summary.textContent = filtered
-    ? `模型（显示 ${models.length}/${allModels.length}，${allModels.filter((model) => model.enabled).length} 个已启用）`
-    : `模型（${allModels.filter((model) => model.enabled).length} 个已启用）`;
-  wrapper.append(summary);
-  let populated = false;
-  const populate = (): void => {
-    if (populated) return;
-    populated = true;
-    if (models.length === 0) {
-      const empty = document.createElement('p');
-      empty.className = 'muted';
-      empty.textContent = allModels.length === 0 ? '刷新后显示模型。' : '没有符合筛选条件的模型。';
-      wrapper.append(empty);
-    }
-    for (const model of models) wrapper.append(renderModelRow(channel, model));
-  };
-  wrapper.addEventListener('toggle', () => {
-    if (wrapper.open) {
-      openModelChannels.add(channel.id);
-      populate();
+}
+
+function currentChannel(channelId: string, fallback?: ChannelConfig): ChannelConfig {
+  return state.channels.find((item) => item.id === channelId) ?? fallback ?? { id: channelId, name: '', ...createChannelDefaults('custom') };
+}
+
+function modelPickerTitleText(channelId: string): string {
+  const allModels = channelModels(channelId);
+  const query = (modelSearchTerms.get(channelId) ?? '').trim().toLocaleLowerCase();
+  const models = allModels.filter((model) => !query || `${model.name} ${model.customAlias ?? ''}`.toLocaleLowerCase().includes(query));
+  const enabledCount = allModels.filter((model) => model.enabled).length;
+  return query
+    ? `模型（显示 ${models.length}/${allModels.length}，${enabledCount} 个已启用）`
+    : `模型（${enabledCount} 个已启用）`;
+}
+
+function modelPickerAnchor(channelId: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(`[data-channel-id="${channelId}"] .model-combobox`);
+}
+
+function ensureModelPickerOverlay(): { overlay: HTMLElement; options: HTMLElement } {
+  if (!modelPickerOverlay || !modelPickerOptions) {
+    modelPickerOverlay = document.createElement('div');
+    modelPickerOverlay.id = 'model-picker-overlay';
+    modelPickerOverlay.className = 'model-picker-overlay';
+    modelPickerOverlay.hidden = true;
+    modelPickerOptions = document.createElement('div');
+    modelPickerOptions.className = 'model-options';
+    modelPickerOptions.setAttribute('role', 'listbox');
+    modelPickerOverlay.append(modelPickerOptions);
+    document.body.append(modelPickerOverlay);
+  }
+  if (!modelPickerListenersBound) {
+    modelPickerListenersBound = true;
+    document.addEventListener('mousedown', handleModelPickerOutsidePointer);
+    window.addEventListener('resize', syncModelPickerOverlay);
+    document.addEventListener('scroll', syncModelPickerOverlay, true);
+    modelPickerOverlay.addEventListener('mousedown', (event) => event.preventDefault());
+  }
+  return { overlay: modelPickerOverlay, options: modelPickerOptions };
+}
+
+function isModelPickerOpen(channelId: string): boolean {
+  return activeModelPickerChannelId === channelId && !!modelPickerOverlay && !modelPickerOverlay.hidden;
+}
+
+function setModelPickerExpanded(channelId: string, expanded: boolean): void {
+  const combobox = modelPickerAnchor(channelId);
+  const search = document.querySelector<HTMLInputElement>(`[data-channel-id="${channelId}"] .model-picker-search`);
+  search?.setAttribute('aria-expanded', String(expanded));
+  combobox?.classList.toggle('is-open', expanded);
+  combobox?.querySelector('.model-combobox-toggle')?.setAttribute('aria-expanded', String(expanded));
+}
+
+function openModelPicker(channelId: string): void {
+  if (!modelPickerAnchor(channelId)) return;
+  const opening = !isModelPickerOpen(channelId);
+  activeModelPickerChannelId = channelId;
+  const { overlay } = ensureModelPickerOverlay();
+  overlay.hidden = false;
+  setModelPickerExpanded(channelId, true);
+  refreshModelPickerOverlay(opening);
+  syncModelPickerOverlay();
+}
+
+function closeModelPicker(): void {
+  if (activeModelPickerChannelId) setModelPickerExpanded(activeModelPickerChannelId, false);
+  activeModelPickerChannelId = null;
+  if (modelPickerOverlay) modelPickerOverlay.hidden = true;
+}
+
+function syncModelPickerOverlay(): void {
+  if (!activeModelPickerChannelId || !modelPickerOverlay || modelPickerOverlay.hidden) return;
+  const anchor = modelPickerAnchor(activeModelPickerChannelId);
+  if (!anchor) {
+    closeModelPicker();
+    return;
+  }
+  const rect = anchor.getBoundingClientRect();
+  modelPickerOverlay.style.top = `${rect.bottom + 1}px`;
+  modelPickerOverlay.style.left = `${rect.left}px`;
+  modelPickerOverlay.style.width = `${rect.width}px`;
+}
+
+function handleModelPickerOutsidePointer(event: MouseEvent): void {
+  if (!activeModelPickerChannelId || !modelPickerOverlay || modelPickerOverlay.hidden) return;
+  const target = event.target;
+  if (!(target instanceof Node)) return;
+  if (modelPickerOverlay.contains(target)) return;
+  const anchor = modelPickerAnchor(activeModelPickerChannelId);
+  if (anchor?.contains(target)) return;
+  closeModelPicker();
+}
+
+function modelPickerDisplayName(model: CatalogModel): string {
+  return model.name;
+}
+
+function refreshModelPickerOverlay(resetScroll = false): void {
+  if (!activeModelPickerChannelId) return;
+  const channelId = activeModelPickerChannelId;
+  const { options } = ensureModelPickerOverlay();
+  const channel = currentChannel(channelId);
+  const allModels = channelModels(channelId);
+  const scrollTop = resetScroll ? 0 : options.scrollTop;
+  const query = (modelSearchTerms.get(channelId) ?? '').trim().toLocaleLowerCase();
+  const models = sortModelsForPicker(allModels.filter((model) => !query || `${model.name} ${model.customAlias ?? ''}`.toLocaleLowerCase().includes(query)));
+  const selectedId = selectedModelIds.get(channelId) ?? allModels[0]?.id;
+  const title = document.querySelector(`[data-channel-id="${channelId}"] .model-picker-title`);
+  if (title) title.textContent = modelPickerTitleText(channelId);
+  options.replaceChildren();
+  if (models.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = allModels.length === 0 ? '刷新后显示模型。' : '没有符合搜索条件的模型。';
+    options.append(empty);
+    options.scrollTop = scrollTop;
+    return;
+  }
+  for (const model of models) {
+    const item = document.createElement('div');
+    item.className = 'model-option';
+    item.setAttribute('role', 'option');
+    item.setAttribute('aria-selected', String(model.id === selectedId));
+    const label = modelPickerDisplayName(model);
+    const select = button(label, () => selectModelFromPicker(channelId, model), 'model-option-select');
+    const toggleModel = button(model.enabled ? '停用' : '启用', () => {
+      send('saveModel', { channelId: model.channelId, id: model.id, enabled: !model.enabled });
+    }, 'model-option-toggle');
+    toggleModel.disabled = !channel.enabled || !model.available || !protocolConfigured(channel, model.protocol);
+    item.append(select, toggleModel);
+    const enabledCheck = document.createElement('span');
+    enabledCheck.className = 'model-enabled-check';
+    if (model.enabled) {
+      enabledCheck.textContent = '✓';
+      enabledCheck.setAttribute('aria-label', '已启用');
     } else {
-      openModelChannels.delete(channel.id);
+      enabledCheck.setAttribute('aria-hidden', 'true');
     }
+    item.append(enabledCheck);
+    options.append(item);
+  }
+  options.scrollTop = scrollTop;
+}
+
+function selectModelFromPicker(channelId: string, model: CatalogModel): void {
+  selectedModelIds.set(channelId, model.id);
+  modelSearchTerms.delete(channelId);
+  const channel = currentChannel(channelId);
+  const label = modelPickerDisplayName(model);
+  const search = document.querySelector<HTMLInputElement>(`[data-channel-id="${channelId}"] .model-picker-search`);
+  if (search) search.value = label;
+  const selectedModelContainer = document.querySelector(`[data-channel-id="${channelId}"] .selected-model-container`);
+  selectedModelContainer?.replaceChildren(renderModelRow(channel, model));
+  closeModelPicker();
+}
+
+function renderChannelModels(channel: ChannelConfig): HTMLElement {
+  const wrapper = document.createElement('section');
+  wrapper.className = 'models';
+  wrapper.dataset.channelId = channel.id;
+  const channelId = channel.id;
+  const pickerLabel = document.createElement('label');
+  pickerLabel.className = 'model-picker';
+  const pickerTitle = document.createElement('span');
+  pickerTitle.className = 'model-picker-title';
+  pickerTitle.textContent = modelPickerTitleText(channelId);
+  const search = document.createElement('input');
+  search.type = 'search';
+  search.className = 'model-picker-search';
+  search.placeholder = '搜索或选择模型';
+  search.setAttribute('role', 'combobox');
+  search.setAttribute('aria-autocomplete', 'list');
+  search.setAttribute('aria-controls', 'model-picker-overlay');
+  search.setAttribute('aria-expanded', String(isModelPickerOpen(channelId)));
+  const combobox = document.createElement('div');
+  combobox.className = 'model-combobox';
+  const toggle = button('', () => undefined, 'model-combobox-toggle');
+  toggle.setAttribute('aria-label', '显示模型列表');
+  toggle.setAttribute('aria-expanded', String(isModelPickerOpen(channelId)));
+  combobox.append(search, toggle);
+  pickerLabel.append(pickerTitle, combobox);
+  const selectedModelContainer = document.createElement('div');
+  selectedModelContainer.className = 'selected-model-container';
+  const allModels = channelModels(channelId);
+  const selectedModel = (): CatalogModel | undefined => allModels.find((model) => model.id === selectedModelIds.get(channelId)) ?? allModels[0];
+  const initialModel = selectedModel();
+  if (initialModel) {
+    search.value = modelPickerDisplayName(initialModel);
+    selectedModelContainer.replaceChildren(renderModelRow(channel, initialModel));
+  } else {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = '刷新后显示模型。';
+    selectedModelContainer.append(empty);
+    search.disabled = true;
+    toggle.disabled = true;
+  }
+  search.addEventListener('input', () => {
+    modelSearchTerms.set(channelId, search.value);
+    openModelPicker(channelId);
   });
-  if (wrapper.open) populate();
+  search.addEventListener('focus', () => {
+    openModelPicker(channelId);
+    search.select();
+  });
+  search.addEventListener('click', () => openModelPicker(channelId));
+  search.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      const current = selectedModel();
+      if (current) search.value = modelPickerDisplayName(current);
+      modelSearchTerms.delete(channelId);
+      closeModelPicker();
+      return;
+    }
+    if (!isModelPickerOpen(channelId)) openModelPicker(channelId);
+  });
+  toggle.addEventListener('mousedown', (event) => event.preventDefault());
+  toggle.addEventListener('click', () => {
+    if (isModelPickerOpen(channelId)) {
+      closeModelPicker();
+      return;
+    }
+    modelSearchTerms.delete(channelId);
+    search.value = '';
+    openModelPicker(channelId);
+    search.focus();
+  });
+  wrapper.append(pickerLabel, selectedModelContainer);
   return wrapper;
 }
 
 function renderModelRow(channel: ChannelConfig, model: CatalogModel): HTMLElement {
   const row = document.createElement('div');
-  row.className = `model-row${model.enabled ? ' enabled' : ''}`;
+  row.className = 'model-row';
   const top = document.createElement('div');
   top.className = 'model-config';
-  const enabledLabel = document.createElement('label');
-  enabledLabel.className = 'checkbox model-enabled';
-  const enabled = document.createElement('input');
-  enabled.type = 'checkbox';
-  enabled.checked = model.enabled;
-  enabled.disabled = !channel.enabled || !model.available || !protocolConfigured(channel, model.protocol);
-  enabled.addEventListener('change', () => send('saveModel', { channelId: model.channelId, id: model.id, enabled: enabled.checked }));
-  enabledLabel.append(enabled, document.createTextNode('启用'));
+  const nameRow = document.createElement('div');
+  nameRow.className = 'model-config-row model-name-row';
+  const nameText = document.createElement('span');
+  nameText.className = 'model-config-label';
+  nameText.textContent = '模型名';
+  const modelName = document.createElement('strong');
+  modelName.className = 'model-original-name';
+  modelName.textContent = model.name;
+  nameRow.append(nameText, modelName);
+  const aliasRow = document.createElement('div');
+  aliasRow.className = 'model-config-row model-alias-row';
+  const aliasText = document.createElement('span');
+  aliasText.className = 'model-config-label';
+  aliasText.textContent = '别名';
   const alias = document.createElement('input');
   alias.className = 'model-alias';
   alias.setAttribute('aria-label', `${model.name} 的显示别名`);
@@ -215,19 +409,23 @@ function renderModelRow(channel: ChannelConfig, model: CatalogModel): HTMLElemen
       alias.blur();
     }
   });
-  top.append(enabledLabel, alias);
-  const name = document.createElement('div');
-  name.className = 'muted';
-  const nameLabel = document.createElement('span');
-  nameLabel.textContent = '原模型： ';
-  const modelName = document.createElement('strong');
-  modelName.className = 'model-original-name';
-  modelName.textContent = model.name;
-  name.append(nameLabel, modelName);
+  aliasRow.append(aliasText, alias);
+  const enabledRow = document.createElement('label');
+  enabledRow.className = 'model-config-row model-enabled-row';
+  const enabledText = document.createElement('span');
+  enabledText.className = 'model-config-label';
+  enabledText.textContent = '启用';
+  const enabled = document.createElement('input');
+  enabled.type = 'checkbox';
+  enabled.checked = model.enabled;
+  enabled.disabled = !channel.enabled || !model.available || !protocolConfigured(channel, model.protocol);
+  enabled.addEventListener('change', () => send('saveModel', { channelId: model.channelId, id: model.id, enabled: enabled.checked }));
+  enabledRow.append(enabledText, enabled);
+  top.append(nameRow, aliasRow, enabledRow);
   const metadata = document.createElement('div');
   metadata.className = 'muted';
   metadata.textContent = `${model.protocol} · ${model.available ? '可用' : '目录中已消失'} · ${model.maxInputTokens}/${model.maxOutputTokens} tokens · ${model.toolCalling ? '支持工具' : '未声明工具'}`;
-  row.append(top, name, metadata, button('编辑元数据', () => openModelEditor(model)));
+  row.append(top, metadata, button('编辑元数据', () => openModelEditor(model)));
   return row;
 }
 
@@ -309,17 +507,16 @@ byId<HTMLFormElement>('channel-form').addEventListener('submit', (event) => {
   });
 });
 
-byId<HTMLInputElement>('model-search').addEventListener('input', renderChannels);
-byId<HTMLSelectElement>('model-filter').addEventListener('change', renderChannels);
-
 function openModelEditor(model: CatalogModel): void {
   const container = byId('model-editor');
+  const current = state.models.find((item) => item.channelId === model.channelId && item.id === model.id) ?? model;
+  const baseline = catalogMetadataBaseline(current);
   const form = document.createElement('form');
   form.className = 'card form-card';
   const heading = document.createElement('h2');
   heading.textContent = `编辑元数据：${model.name}`;
-  const inputLabel = numericLabel('输入上限', model.maxInputTokens, 1024);
-  const outputLabel = numericLabel('输出上限', model.maxOutputTokens, 256);
+  const inputLabel = numericLabel('输入上限', current.maxInputTokens, 1024);
+  const outputLabel = numericLabel('输出上限', current.maxOutputTokens, 256);
   const protocolLabel = document.createElement('label');
   protocolLabel.textContent = '调用协议';
   const protocol = document.createElement('select');
@@ -329,20 +526,42 @@ function openModelEditor(model: CatalogModel): void {
     option.textContent = item;
     protocol.append(option);
   }
-  protocol.value = model.protocol;
+  protocol.value = current.protocol;
   protocolLabel.append(protocol);
   const toolsLabel = document.createElement('label');
   toolsLabel.className = 'checkbox';
   const tools = document.createElement('input');
   tools.type = 'checkbox';
-  tools.checked = model.toolCalling;
+  tools.checked = current.toolCalling;
   toolsLabel.append(tools, document.createTextNode('支持工具调用'));
+  const differsFromBaseline = (): boolean => protocol.value !== baseline.protocol
+    || Number(inputLabel.input.value) !== baseline.maxInputTokens
+    || Number(outputLabel.input.value) !== baseline.maxOutputTokens
+    || tools.checked !== baseline.toolCalling;
+  const restoreForm = (): void => {
+    protocol.value = baseline.protocol;
+    inputLabel.input.value = String(baseline.maxInputTokens);
+    outputLabel.input.value = String(baseline.maxOutputTokens);
+    tools.checked = baseline.toolCalling;
+    updateRestoreState();
+  };
   const actions = document.createElement('div');
   actions.className = 'actions';
+  const restore = button('还原', restoreForm);
+  restore.type = 'button';
+  restore.disabled = true;
+  const updateRestoreState = (): void => {
+    restore.disabled = !differsFromBaseline();
+  };
   const save = button('保存', () => undefined, 'primary');
   save.type = 'submit';
-  actions.append(save, button('取消', () => container.replaceChildren()));
+  actions.append(restore, save, button('取消', () => container.replaceChildren()));
   form.append(heading, protocolLabel, inputLabel.label, outputLabel.label, toolsLabel, actions);
+  protocol.addEventListener('change', updateRestoreState);
+  inputLabel.input.addEventListener('input', updateRestoreState);
+  outputLabel.input.addEventListener('input', updateRestoreState);
+  tools.addEventListener('change', updateRestoreState);
+  updateRestoreState();
   form.addEventListener('submit', (event) => {
     event.preventDefault();
     send('saveModel', { channelId: model.channelId, id: model.id, protocol: protocol.value, maxInputTokens: Number(inputLabel.input.value), maxOutputTokens: Number(outputLabel.input.value), toolCalling: tools.checked });
@@ -363,14 +582,68 @@ function numericLabel(text: string, current: number, min: number): { label: HTML
   return { label, input };
 }
 
-const chatRows: Array<{ prefix: string; key: ChatSettingKey; field: keyof ChatSettingSelections }> = [
-  { prefix: 'chat-default', key: 'chat.defaultModel', field: 'chatDefault' },
-  { prefix: 'inline-chat', key: 'inlineChat.defaultModel', field: 'inlineChat' },
-  { prefix: 'plan-agent', key: 'chat.planAgent.defaultModel', field: 'planAgent' },
-  { prefix: 'implement-agent', key: 'github.copilot.chat.implementAgent.model', field: 'implementAgent' },
-  { prefix: 'utility', key: 'chat.utilityModel', field: 'utility' },
-  { prefix: 'utility-small', key: 'chat.utilitySmallModel', field: 'utilitySmall' },
+const chatRows: Array<{ prefix: string; label: string; key: ChatSettingKey; field: keyof ChatSettingSelections }> = [
+  { prefix: 'chat-default', label: 'Chat 默认模型', key: 'chat.defaultModel', field: 'chatDefault' },
+  { prefix: 'inline-chat', label: 'Inline Chat 默认模型', key: 'inlineChat.defaultModel', field: 'inlineChat' },
+  { prefix: 'plan-agent', label: 'Plan Agent 默认模型', key: 'chat.planAgent.defaultModel', field: 'planAgent' },
+  { prefix: 'implement-agent', label: 'Plan 实现阶段模型（实验性）', key: 'github.copilot.chat.implementAgent.model', field: 'implementAgent' },
+  { prefix: 'utility', label: 'Chat: Utility Model', key: 'chat.utilityModel', field: 'utility' },
+  { prefix: 'utility-small', label: 'Chat: Utility Small Model', key: 'chat.utilitySmallModel', field: 'utilitySmall' },
 ];
+let selectedChatBindingPrefix = 'chat-default';
+let chatBindingPickerOpen = false;
+
+function setChatBindingPickerOpen(open: boolean): void {
+  chatBindingPickerOpen = open;
+  const trigger = byId<HTMLButtonElement>('chat-binding-picker-trigger');
+  const options = byId<HTMLDivElement>('chat-binding-picker-options');
+  options.hidden = !open;
+  trigger.setAttribute('aria-expanded', String(open));
+}
+
+function renderChatBindingPicker(): void {
+  const trigger = byId<HTMLButtonElement>('chat-binding-picker-trigger');
+  const options = byId<HTMLDivElement>('chat-binding-picker-options');
+  trigger.textContent = chatRows.find((row) => row.prefix === selectedChatBindingPrefix)?.label ?? selectedChatBindingPrefix;
+  options.replaceChildren();
+  for (const row of chatRows) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'chat-binding-picker-option';
+    item.setAttribute('role', 'option');
+    item.setAttribute('aria-selected', String(row.prefix === selectedChatBindingPrefix));
+    const label = document.createElement('span');
+    label.className = 'chat-binding-picker-option-label';
+    label.textContent = row.label;
+    item.append(label);
+    if (state.chatBindings[row.key]) {
+      const check = document.createElement('span');
+      check.className = 'chat-binding-picker-check';
+      check.textContent = '✓';
+      check.setAttribute('aria-label', '已配置');
+      item.append(check);
+    }
+    item.addEventListener('click', () => {
+      selectedChatBindingPrefix = row.prefix;
+      setChatBindingPickerOpen(false);
+      showChatBinding(row.prefix);
+      renderChatBindingPicker();
+    });
+    options.append(item);
+  }
+}
+
+byId<HTMLButtonElement>('chat-binding-picker-trigger').addEventListener('click', () => setChatBindingPickerOpen(!chatBindingPickerOpen));
+document.addEventListener('mousedown', (event) => {
+  if (!chatBindingPickerOpen) return;
+  const target = event.target;
+  if (!(target instanceof Node)) return;
+  const trigger = byId<HTMLButtonElement>('chat-binding-picker-trigger');
+  const options = byId<HTMLDivElement>('chat-binding-picker-options');
+  if (trigger.contains(target) || options.contains(target)) return;
+  setChatBindingPickerOpen(false);
+});
+byId<HTMLDivElement>('chat-binding-picker-options').addEventListener('mousedown', (event) => event.preventDefault());
 
 for (const row of chatRows) {
   byId<HTMLSelectElement>(`${row.prefix}-channel`).addEventListener('change', () => fillModelPicker(row.prefix));
@@ -401,7 +674,15 @@ function renderChatBindings(): void {
       : target?.channelId === channelPicker.value ? target.modelId : undefined;
     fillModelPicker(row.prefix, preferredModelId);
   }
+  renderChatBindingPicker();
+  showChatBinding(selectedChatBindingPrefix);
   chatBindingsRendered = true;
+}
+
+function showChatBinding(prefix: string): void {
+  for (const row of chatRows) {
+    byId<HTMLElement>(`${row.prefix}-binding`).hidden = row.prefix !== prefix;
+  }
 }
 
 function fillModelPicker(prefix: string, selectedModelId?: string): void {
@@ -435,67 +716,32 @@ byId<HTMLFormElement>('chat-form').addEventListener('submit', (event) => {
     }
     if (channelId && modelId) payload[row.field] = { channelId, modelId };
   }
+  if (Object.keys(payload).length === 0) {
+    const activeRow = chatRows.find((row) => row.prefix === selectedChatBindingPrefix);
+    if (activeRow && state.chatBindings[activeRow.key]) {
+      send('restoreChatSetting', { setting: activeRow.key });
+      return;
+    }
+    return;
+  }
   send('applyChatSettings', payload);
 });
 
-function renderSync(): void {
-  const { enabled, locked, hasVault, localShared, cloudState, error } = state.sync;
-  const status = byId('sync-status');
-  const statusType = syncOperationPending ? 'syncing' : cloudState === 'error' ? 'unsynced' : enabled && !locked ? 'synced' : 'unsynced';
-  status.className = `status sync-status ${statusType}`;
-  status.textContent = syncOperationPending
-    ? '同步中'
-    : error
-      ? '同步失败'
-      : locked
-        ? '等待解锁'
-        : enabled
-          ? '已加入 VS Code 同步'
-          : localShared
-            ? '本机 Profile 已共享'
-            : '未同步';
-  status.title = syncOperationPending
-    ? '正在同步完整配置和加密保险库。'
-    : error
-      ? error
-      : locked
-        ? '已收到同步保险库，当前 Profile 需要输入主密码解锁一次。'
-        : enabled
-          ? '本机所有 Profile 共享配置；当前 Profile 已解锁，状态已写入 VS Code Settings Sync。'
-          : '本机所有 Profile 已共享；创建同步主密码后可通过 VS Code Settings Sync 同步到其他设备。';
-  byId<HTMLFormElement>('sync-enable-form').hidden = enabled || hasVault;
-  byId<HTMLFormElement>('sync-unlock-form').hidden = !locked;
-  byId<HTMLFormElement>('sync-change-form').hidden = !enabled || locked;
-  byId<HTMLButtonElement>('sync-reset').hidden = !hasVault;
-}
-
-byId<HTMLFormElement>('sync-enable-form').addEventListener('submit', (event) => {
-  event.preventDefault();
-  sendSyncOperation('enableSync', { password: value('sync-enable-password'), confirmation: value('sync-enable-confirmation') });
-});
-
-byId<HTMLFormElement>('sync-unlock-form').addEventListener('submit', (event) => {
-  event.preventDefault();
-  sendSyncOperation('unlockSync', { password: value('sync-unlock-password') });
-});
-
-byId<HTMLFormElement>('sync-change-form').addEventListener('submit', (event) => {
-  event.preventDefault();
-  sendSyncOperation('changeSyncPassword', { password: value('sync-change-password'), confirmation: value('sync-change-confirmation') });
-});
-
-byId<HTMLButtonElement>('sync-reset').addEventListener('click', () => sendSyncOperation('resetSync'));
-
-function sendSyncOperation(type: string, payload?: unknown): void {
-  syncOperationPending = true;
-  renderSync();
-  send(type, payload);
-}
-
-function clearSyncPasswords(): void {
-  for (const id of ['sync-enable-password', 'sync-enable-confirmation', 'sync-unlock-password', 'sync-change-password', 'sync-change-confirmation']) {
-    byId<HTMLInputElement>(id).value = '';
+function renderSyncBanner(): void {
+  const banner = byId('sync-banner');
+  const { locked, cloudState, error } = state.sync;
+  const visible = cloudState === 'error' || locked;
+  banner.hidden = !visible;
+  if (!visible) return;
+  if (cloudState === 'error') {
+    banner.className = 'sync-banner status error';
+    banner.textContent = `跨设备同步失败：${error ?? '未知错误'}`;
+    banner.title = error ?? '';
+    return;
   }
+  banner.className = 'sync-banner status';
+  banner.textContent = '等待同步密钥：加密密钥尚未从 VS Code Settings Sync 到达，稍后会自动完成。';
+  banner.title = '跨设备 API Key 同步会在密钥到达后自动恢复。';
 }
 
 function option(value: string, label: string): HTMLOptionElement {

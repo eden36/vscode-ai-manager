@@ -1,4 +1,6 @@
 import type { CatalogChange, CatalogModel, CatalogRefreshSummary, ChannelConfig, ModelProtocol } from './types';
+import { catalogMetadataFrom } from './catalog-metadata';
+export { catalogMetadataBaseline } from './catalog-metadata';
 import { classifyHttpError, RequestError, safeErrorMessage } from './errors';
 import { createModelProviderId, getProtocolPath } from './models';
 import { StorageService } from './storage';
@@ -137,9 +139,11 @@ export class CatalogService {
         const discoveredIds = new Set(discovered.map((model) => model.id));
         merged = discovered.map((model) => {
           const old = previousById.get(model.id);
+          const catalogMetadata = catalogMetadataFrom(model);
           const protocol = old?.metadataOverridden ? old.protocol : model.protocol;
           const stable = {
             ...model,
+            catalogMetadata,
             providerId: createModelProviderId(channel, model.id, protocol),
             customAlias: old?.customAlias,
             enabled: getProtocolPath(channel, protocol) ? old?.enabled ?? false : false,

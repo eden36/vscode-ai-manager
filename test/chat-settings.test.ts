@@ -79,6 +79,13 @@ beforeEach(() => {
 });
 
 describe('ChatBindingService', () => {
+  it('未选择任何设置时不执行修改', async () => {
+    const { data, storage } = createStorage();
+    await new ChatBindingService(storage as any).apply({});
+    expect(mocks.updates).toEqual([]);
+    expect(data.bindings).toEqual([]);
+  });
+
   it('为六类 Chat 设置写入对应格式的模型值', async () => {
     const { storage } = createStorage();
     await new ChatBindingService(storage as any).apply({

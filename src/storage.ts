@@ -22,18 +22,15 @@ import {
   type SharedStoreChange,
   type VersionedRecord,
 } from './shared-state';
-import type { EncryptedVault, SyncManifestV3, SyncProfile } from './sync';
+import type { EncryptedVault, SyncManifestV3 } from './sync';
 import type { CatalogModel, ChannelConfig, ChatBindingRecord, ChatSettingKey } from './types';
 
-const CHANNELS_KEY = 'aiManager.channels';
-const MODELS_KEY = 'aiManager.models';
-const BINDINGS_KEY = 'aiManager.chatBindings';
-const LEGACY_SYNC_PROFILE_KEY = 'aiManager.sync.profile.v1';
-const LEGACY_SYNC_VAULT_KEY = 'aiManager.sync.vault.v1';
 const SYNC_MANIFEST_KEY = 'aiManager.sync.manifest.v3';
 const SYNC_VAULT_KEY = 'aiManager.sync.vault.v2';
 const SYNC_CHUNK_PREFIX = 'aiManager.sync.chunk.v3.';
 const SYNC_LOCAL_KEY = 'aiManager.sync.localKey.v1';
+const SYNC_ENCRYPTION_KEY = 'aiManager.sync.encryptionKey.v1';
+const VAULT_KEY_FILE = 'vault-key-v1';
 // 前缀刻意不使用 aiManager.sync.，避免与 setKeysForSync 注册的同步键混淆。
 const PROFILE_APPLIED_RESET_KEY = 'aiManager.profile.appliedReset.v1';
 const STATE_FILE = 'state-v3.json';
@@ -101,11 +98,11 @@ export class StorageService implements vscode.Disposable {
         if (disk) {
           this.state = disk;
         } else if (!this.readOnlyReason) {
-          this.state = this.createLegacyState();
+          this.state = createEmptySharedState();
           await this.writeStateFile(this.state);
         }
         const diskVault = await this.readVaultFile(true);
-        this.vault = diskVault?.vault ?? this.context.globalState.get<EncryptedVault>(LEGACY_SYNC_VAULT_KEY);
+        this.vault = diskVault?.vault;
         if (this.vault && !diskVault?.vault && !this.readOnlyReason) await this.writeVaultFile(this.vault);
       });
     } catch (error) {
@@ -247,14 +244,6 @@ export class StorageService implements vscode.Disposable {
     await this.context.secrets.delete(this.secretKey(channelId));
   }
 
-  getSyncProfile(): SyncProfile | undefined {
-    return this.context.globalState.get<SyncProfile>(LEGACY_SYNC_PROFILE_KEY);
-  }
-
-  async saveSyncProfile(profile: SyncProfile | undefined): Promise<void> {
-    await this.context.globalState.update(LEGACY_SYNC_PROFILE_KEY, profile);
-  }
-
   getSyncVault(): EncryptedVault | undefined {
     return this.vault;
   }
@@ -274,8 +263,7 @@ export class StorageService implements vscode.Disposable {
   }
 
   getSyncedVault(): EncryptedVault | undefined {
-    return this.context.globalState.get<EncryptedVault>(SYNC_VAULT_KEY)
-      ?? this.context.globalState.get<EncryptedVault>(LEGACY_SYNC_VAULT_KEY);
+    return this.context.globalState.get<EncryptedVault>(SYNC_VAULT_KEY);
   }
 
   async saveSyncedVault(vault: EncryptedVault | undefined): Promise<void> {
@@ -311,6 +299,7 @@ export class StorageService implements vscode.Disposable {
     this.context.globalState.setKeysForSync([
       SYNC_MANIFEST_KEY,
       SYNC_VAULT_KEY,
+      SYNC_ENCRYPTION_KEY,
       ...Array.from({ length: chunkCount }, (_, index) => `${SYNC_CHUNK_PREFIX}${index}`),
     ]);
   }
@@ -335,6 +324,35 @@ export class StorageService implements vscode.Disposable {
 
   async deleteSyncLocalKey(): Promise<void> {
     await this.context.secrets.delete(SYNC_LOCAL_KEY);
+  }
+
+  getSyncedEncryptionKey(): string | undefined {
+    return this.context.globalState.get<string>(SYNC_ENCRYPTION_KEY);
+  }
+
+  async saveSyncedEncryptionKey(key: string | undefined): Promise<void> {
+    await this.context.globalState.update(SYNC_ENCRYPTION_KEY, key);
+  }
+
+  async readSharedVaultKey(): Promise<string | undefined> {
+    try {
+      const raw = await readFile(path.join(this.directory, VAULT_KEY_FILE), 'utf8');
+      const trimmed = raw.trim();
+      return trimmed || undefined;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      this.vaultError = error instanceof Error ? error.message : '共享密钥读取失败';
+      return undefined;
+    }
+  }
+
+  async writeSharedVaultKey(key: string): Promise<void> {
+    await this.ensureInitialized();
+    await this.atomicWrite(VAULT_KEY_FILE, `${key}\n`);
+  }
+
+  async deleteSharedVaultKey(): Promise<void> {
+    await rm(path.join(this.directory, VAULT_KEY_FILE), { force: true });
   }
 
   async mergeRemoteState(remote: SharedStateV3): Promise<boolean> {
@@ -436,17 +454,6 @@ export class StorageService implements vscode.Disposable {
     if (!current || current.deleted) return;
     state.clock += 1;
     records[key] = { revision: state.clock, deviceId: this.deviceId, deleted: true };
-  }
-
-  private createLegacyState(): SharedStateV3 {
-    const state = createEmptySharedState();
-    const channels = this.context.globalState.get<ChannelConfig[]>(CHANNELS_KEY, []).map(normalizeChannel);
-    const models = this.context.globalState.get<CatalogModel[]>(MODELS_KEY, []);
-    const bindings = this.context.globalState.get<ChatBindingRecord[]>(BINDINGS_KEY, []);
-    this.replaceChannels(state, channels);
-    this.replaceRecords(state, state.models, models, (model) => modelRecordKey(model.channelId, model.id));
-    this.replaceRecords(state, state.bindings, bindings, (binding) => binding.setting);
-    return state;
   }
 
   // preserveCorrupt 只能在已持有文件锁时为 true：重命名目标文件会与其他窗口的写入竞争。

@@ -57,6 +57,14 @@ export interface CatalogModel {
   toolCalling: boolean;
   lastSeenAt: number;
   metadataOverridden?: boolean;
+  catalogMetadata?: CatalogModelMetadata;
+}
+
+export interface CatalogModelMetadata {
+  protocol: ModelProtocol;
+  maxInputTokens: number;
+  maxOutputTokens: number;
+  toolCalling: boolean;
 }
 
 export interface ChatModelTarget {

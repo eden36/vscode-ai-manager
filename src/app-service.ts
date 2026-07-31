@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { joinEndpoint, CatalogService } from './catalog';
+import { catalogMetadataBaseline } from './catalog-metadata';
 import type { ChatBindingService } from './chat-settings';
 import { createChannelDefaults, isChannelPreset } from './presets';
 import { createModelProviderId, getProtocolPath } from './models';
@@ -61,7 +62,6 @@ export class AppService implements vscode.Disposable {
     if (input.id && !existing) throw new Error('渠道不存在');
     const channelId = existing?.id ?? randomUUID();
     const previousApiKey = await this.storage.getApiKey(channelId);
-    const previousProfile = this.storage.getSyncProfile();
     const previousVault = this.storage.getSyncVault();
     let channel: ChannelConfig | undefined;
     try {
@@ -107,7 +107,6 @@ export class AppService implements vscode.Disposable {
           ? channels.map((item) => item.id === channelId ? existing : item)
           : channels.filter((item) => item.id !== channelId)),
         previousApiKey === undefined ? this.storage.deleteApiKey(channelId) : this.storage.saveApiKey(channelId, previousApiKey),
-        this.storage.saveSyncProfile(previousProfile),
         this.storage.saveSyncVault(previousVault),
       ]);
       if (rollback.some((result) => result.status === 'rejected')) {
@@ -152,7 +151,7 @@ export class AppService implements vscode.Disposable {
   async refreshAll(dueOnly = false, skipWhenLocked = false): Promise<CatalogRefreshSummary> {
     await this.sync.reconcile();
     if (this.sync.getStatus().locked) {
-      if (!skipWhenLocked) throw new Error('请先解锁 API Key 同步');
+      if (!skipWhenLocked) throw new Error('同步密钥尚未就绪');
       this.changeEmitter.fire();
       return { changes: [], failures: [] };
     }
@@ -174,39 +173,29 @@ export class AppService implements vscode.Disposable {
       const customAlias = input.customAlias === undefined ? model.customAlias : input.customAlias.trim() || undefined;
       if (customAlias && customAlias.length > 80) throw new Error('模型别名不能超过 80 个字符');
       const metadataChanged = input.protocol !== undefined || input.maxInputTokens !== undefined || input.maxOutputTokens !== undefined || input.toolCalling !== undefined;
+      const maxInputTokens = input.maxInputTokens === undefined ? model.maxInputTokens : this.boundedInteger(input.maxInputTokens, 1_024, 10_000_000, '输入上限');
+      const maxOutputTokens = input.maxOutputTokens === undefined ? model.maxOutputTokens : this.boundedInteger(input.maxOutputTokens, 256, 1_000_000, '输出上限');
+      const toolCalling = input.toolCalling ?? model.toolCalling;
+      const baseline = catalogMetadataBaseline(model);
+      const matchesCatalog = protocol === baseline.protocol
+        && maxInputTokens === baseline.maxInputTokens
+        && maxOutputTokens === baseline.maxOutputTokens
+        && toolCalling === baseline.toolCalling;
       const updated: CatalogModel = {
         ...model,
         customAlias,
         enabled,
         protocol,
         providerId: channel ? createModelProviderId(channel, model.id, protocol) : model.providerId,
-        maxInputTokens: input.maxInputTokens === undefined ? model.maxInputTokens : this.boundedInteger(input.maxInputTokens, 1_024, 10_000_000, '输入上限'),
-        maxOutputTokens: input.maxOutputTokens === undefined ? model.maxOutputTokens : this.boundedInteger(input.maxOutputTokens, 256, 1_000_000, '输出上限'),
-        toolCalling: input.toolCalling ?? model.toolCalling,
-        metadataOverridden: metadataChanged ? true : model.metadataOverridden,
+        maxInputTokens,
+        maxOutputTokens,
+        toolCalling,
+        metadataOverridden: !metadataChanged ? model.metadataOverridden : !matchesCatalog,
       };
       return models.map((item) => item.channelId === updated.channelId && item.id === updated.id ? updated : item);
     });
     await this.sync.saveProfileFromLocal();
     await this.chatBindings.reconcile();
-    this.changeEmitter.fire();
-  }
-
-  async enableSync(password: string, confirmation: string): Promise<void> {
-    this.assertMatchingPasswords(password, confirmation);
-    await this.sync.enable(password);
-    this.changeEmitter.fire();
-  }
-
-  async unlockSync(password: string): Promise<CatalogRefreshSummary> {
-    await this.sync.unlock(password);
-    this.changeEmitter.fire();
-    return this.refreshAll(false, true);
-  }
-
-  async changeSyncPassword(password: string, confirmation: string): Promise<void> {
-    this.assertMatchingPasswords(password, confirmation);
-    await this.sync.changePassword(password);
     this.changeEmitter.fire();
   }
 
@@ -246,9 +235,5 @@ export class AppService implements vscode.Disposable {
 
   private parseAuthMode(value: unknown): ChannelAuthMode {
     return value === 'anthropic-api-key' || value === 'google-api-key' ? value : 'bearer';
-  }
-
-  private assertMatchingPasswords(password: string, confirmation: string): void {
-    if (password !== confirmation) throw new Error('两次输入的同步主密码不一致');
   }
 }

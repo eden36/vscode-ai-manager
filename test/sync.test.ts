@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,7 +8,7 @@ vi.mock('vscode', () => ({}));
 
 import { StorageService } from '../src/storage';
 import { createEmptySharedState } from '../src/shared-state';
-import { createEncryptedVault, decodeSharedState, decryptWithKey, encodeSharedState, encryptWithKey, SyncService, unlockEncryptedVault } from '../src/sync';
+import { decodeSharedState, decryptWithKey, encodeSharedState, encryptWithKey, SyncService } from '../src/sync';
 import { createModelProviderId } from '../src/models';
 import { channel, model } from './fixtures';
 
@@ -38,28 +39,24 @@ function createContext(initialValues = new Map<string, unknown>()) {
 }
 
 describe('同步保险库', () => {
-  it('使用随机 IV 加密并拒绝错误密码或篡改密文', async () => {
-    const password = 'correct horse battery staple';
-    const { vault, key } = await createEncryptedVault({ channel: 'top-secret' }, password);
+  it('使用随机 IV 加密并拒绝错误密钥或篡改密文', () => {
+    const key = randomBytes(32);
+    const salt = randomBytes(16);
+    const vault = encryptWithKey({ channel: 'top-secret' }, key, salt);
     expect(JSON.stringify(vault)).not.toContain('top-secret');
-    expect((await unlockEncryptedVault(vault, password)).credentials).toEqual({ channel: 'top-secret' });
-    await expect(unlockEncryptedVault(vault, 'incorrect-password')).rejects.toThrow('同步主密码错误或保险库已损坏');
+    expect(decryptWithKey(vault, key)).toEqual({ channel: 'top-secret' });
+    expect(() => decryptWithKey(vault, randomBytes(32))).toThrow('同步保险库已损坏');
 
-    const second = encryptWithKey({ channel: 'top-secret' }, key, Buffer.from(vault.kdf.salt, 'base64'));
+    const second = encryptWithKey({ channel: 'top-secret' }, key, salt);
     expect(second.cipher.iv).not.toBe(vault.cipher.iv);
     const tampered = { ...vault, cipher: { ...vault.cipher, ciphertext: `${vault.cipher.ciphertext.slice(0, -2)}AA` } };
-    expect(() => decryptWithKey(tampered, key)).toThrow('同步主密码错误或保险库已损坏');
+    expect(() => decryptWithKey(tampered, key)).toThrow('同步保险库已损坏');
   });
 
-  it('支持空保险库', async () => {
-    const { vault, key } = await createEncryptedVault({}, 'empty vault password');
+  it('支持空保险库', () => {
+    const key = randomBytes(32);
+    const vault = encryptWithKey({}, key, randomBytes(16));
     expect(decryptWithKey(vault, key)).toEqual({});
-  });
-
-  it('同步主密码不限制长度但不能为空', async () => {
-    const { vault } = await createEncryptedVault({ channel: 'top-secret' }, '1');
-    expect((await unlockEncryptedVault(vault, '1')).credentials).toEqual({ channel: 'top-secret' });
-    await expect(createEncryptedVault({}, '')).rejects.toThrow('同步主密码不能为空');
   });
 });
 
@@ -123,12 +120,32 @@ describe('SyncService', () => {
     await Promise.all(storageDirectories.map((directory) => rm(directory, { recursive: true, force: true })));
   });
 
-  it('同步完整共享状态和密文，并在新电脑解锁后恢复', async () => {
+  it('扩展初始化时自动创建同步保险库并发布状态', async () => {
     const sync = new SyncService(storage);
-    await sync.enable('correct horse battery staple');
+    await sync.initialize();
+
+    expect(sync.getStatus()).toEqual({
+      enabled: true,
+      locked: false,
+      hasVault: true,
+      localShared: true,
+      cloudState: 'synced',
+    });
+    expect(storage.getSyncedEncryptionKey()).toBeTruthy();
+    expect(await storage.readSharedVaultKey()).toBe(storage.getSyncedEncryptionKey());
+    expect(storage.getSyncManifest()).toBeTruthy();
+  });
+
+  it('同步完整共享状态和密文，并在新电脑自动解锁后恢复', async () => {
+    const sync = new SyncService(storage);
+    await sync.initialize();
 
     const manifest = storage.getSyncManifest()!;
-    expect(source.syncKeys.slice(0, 2)).toEqual(['aiManager.sync.manifest.v3', 'aiManager.sync.vault.v2']);
+    expect(source.syncKeys.slice(0, 3)).toEqual([
+      'aiManager.sync.manifest.v3',
+      'aiManager.sync.vault.v2',
+      'aiManager.sync.encryptionKey.v1',
+    ]);
     expect(source.syncKeys.filter((key) => key.startsWith('aiManager.sync.chunk.v3.')))
       .toHaveLength(manifest.chunkCount);
     const remoteState = await decodeSharedState(
@@ -136,7 +153,6 @@ describe('SyncService', () => {
       Array.from({ length: manifest.chunkCount }, (_, index) => storage.getSyncChunk(index)!),
     );
     expect(remoteState.version).toBe(3);
-    // 刷新时间和刷新错误只留在本机，避免其他设备显示不属于自己的错误并反复触发全量上传。
     expect(remoteState.refresh).toEqual({});
     expect(storage.getChannels()[0]).toMatchObject({ lastRefreshAt: 123, lastRefreshError: '本机错误' });
     expect(Object.values(remoteState.models)[0]?.value).toMatchObject({ customAlias: '同步别名', enabled: true, maxInputTokens: 64_000 });
@@ -149,15 +165,11 @@ describe('SyncService', () => {
     await targetSync.initialize();
     expect(targetSync.getStatus()).toEqual({
       enabled: true,
-      locked: true,
+      locked: false,
       hasVault: true,
       localShared: true,
       cloudState: 'synced',
     });
-    expect(targetStorage.getChannels()).toHaveLength(1);
-    expect(await targetStorage.getApiKey('channel-1')).toBeUndefined();
-
-    await targetSync.unlock('correct horse battery staple');
     expect(await targetStorage.getApiKey('channel-1')).toBe('top-secret');
     expect(targetSync.applyPreference(model({ providerId: 'new-provider', customAlias: undefined, enabled: false })))
       .toMatchObject({ providerId: createModelProviderId(channel(), 'model-1'), customAlias: '同步别名', enabled: true, maxInputTokens: 64_000 });
@@ -165,7 +177,7 @@ describe('SyncService', () => {
 
   it('刷新状态变化不重新上传同步数据，远端清单未变化时不重复解码', async () => {
     const sync = new SyncService(storage);
-    await sync.enable('correct horse battery staple');
+    await sync.initialize();
     const published = storage.getSyncManifest()!;
     const readChunk = vi.spyOn(storage, 'getSyncChunk');
 
@@ -181,48 +193,6 @@ describe('SyncService', () => {
 
     expect(storage.getSyncManifest()!.updatedAt).not.toBe(published.updatedAt);
     readChunk.mockRestore();
-  });
-
-  it('将版本 1 渠道配置迁移为多协议默认值', async () => {
-    const legacyChannel: any = channel({ preset: 'opencode-go' });
-    delete legacyChannel.defaultProtocol;
-    delete legacyChannel.authMode;
-    delete legacyChannel.anthropicPath;
-    delete legacyChannel.geminiPath;
-    const target = createContext(new Map([['aiManager.sync.profile.v1', {
-      version: 1,
-      updatedAt: 1,
-      channels: [legacyChannel],
-      models: [{
-        channelId: 'channel-1',
-        id: 'model-1',
-        enabled: true,
-        customAlias: '旧版同步别名',
-      }],
-    }]]));
-    const targetStorage = await createTestStorage(target.context);
-    const targetSync = new SyncService(targetStorage);
-    await targetSync.initialize();
-    expect(targetStorage.getChannels()[0]).toMatchObject({
-      defaultProtocol: 'openai',
-      authMode: 'bearer',
-      anthropicPath: '/zen/go/v1/messages',
-    });
-    expect(targetSync.applyPreference(model({ enabled: false, customAlias: undefined })))
-      .toMatchObject({ enabled: true, customAlias: '旧版同步别名' });
-  });
-
-  it('应用同步配置时使用新渠道地址更新模型标识', async () => {
-    const oldChannel = channel({ baseUrl: 'https://old.example.com' });
-    const newChannel = channel({ baseUrl: 'https://new.example.com' });
-    const target = createContext(new Map([
-      ['aiManager.channels', [oldChannel]],
-      ['aiManager.models', [model({ providerId: createModelProviderId(oldChannel, 'model-1') })]],
-      ['aiManager.sync.profile.v1', { version: 2, updatedAt: 1, channels: [newChannel], models: [] }],
-    ]));
-    const targetStorage = await createTestStorage(target.context);
-    await new SyncService(targetStorage).initialize();
-    expect(targetStorage.getModels()[0]?.providerId).toBe(createModelProviderId(newChannel, 'model-1'));
   });
 
   it('远端分块损坏时保留本机有效状态并报告错误', async () => {
@@ -245,7 +215,7 @@ describe('SyncService', () => {
 
   it('重置清单只回放一次，不清除之后重新保存的凭据', async () => {
     const sync = new SyncService(storage);
-    await sync.enable('correct horse battery staple');
+    await sync.initialize();
     await sync.reset();
 
     await storage.saveApiKey('channel-1', 'new-secret');
@@ -257,10 +227,9 @@ describe('SyncService', () => {
 
   it('同机每个 Profile 各自清理一次私有凭据', async () => {
     const sync = new SyncService(storage);
-    await sync.enable('correct horse battery staple');
+    await sync.initialize();
     await sync.reset();
 
-    // 同一台设备的另一个 Profile：共享状态目录相同，globalState 与 SecretStorage 独立。
     const other = createContext(new Map([...source.values].filter(([key]) => key.startsWith('aiManager.sync.'))));
     const otherStorage = new StorageService(other.context as any, { directory: storage.directory, deviceId: 'profile-b', watch: false });
     await otherStorage.initialize();
@@ -270,22 +239,16 @@ describe('SyncService', () => {
     await otherSync.initialize();
     expect(await otherStorage.getApiKey('channel-1')).toBeUndefined();
 
-    await otherStorage.saveApiKey('channel-1', 'profile-b-new');
+    await otherSync.saveCredential('channel-1', 'profile-b-new');
     await otherSync.reconcile();
 
     expect(await otherStorage.getApiKey('channel-1')).toBe('profile-b-new');
     otherStorage.dispose();
   });
 
-  it('修改主密码后旧密钥失效，重置时清除同步数据和本机凭据', async () => {
+  it('重置时清除同步数据和本机凭据', async () => {
     const sync = new SyncService(storage);
-    await sync.enable('correct horse battery staple');
-    const oldVault = storage.getSyncVault()!;
-    const oldKey = Buffer.from((await storage.getSyncLocalKey())!, 'base64');
-
-    await sync.changePassword('another secure password');
-    expect(() => decryptWithKey(storage.getSyncVault()!, oldKey)).toThrow('同步主密码错误或保险库已损坏');
-    expect(storage.getSyncVault()!.updatedAt).toBeGreaterThan(oldVault.updatedAt);
+    await sync.initialize();
 
     await sync.reset();
     expect(sync.getStatus()).toEqual({
@@ -295,7 +258,6 @@ describe('SyncService', () => {
       localShared: true,
       cloudState: 'waiting',
     });
-    expect(storage.getSyncProfile()).toBeUndefined();
     expect(await storage.getSyncLocalKey()).toBeUndefined();
     expect(await storage.getApiKey('channel-1')).toBeUndefined();
   });

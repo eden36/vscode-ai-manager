@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .vscode-test/
+.vscode/debug.env
 media/main.js
 media/main.js.map
 coverage/

@@ -11,6 +11,17 @@
         "panel": "dedicated",
         "clear": true
       }
+    },
+    {
+      "label": "在 VS Code 中启动扩展",
+      "type": "npm",
+      "script": "dev:vscode",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": true
+      }
     }
   ]
 }

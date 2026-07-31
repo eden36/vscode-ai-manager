@@ -10,7 +10,7 @@ vi.mock('vscode', () => ({
 
 import { AppService } from '../src/app-service';
 import { CHANNEL_PRESETS } from '../src/presets';
-import { channel } from './fixtures';
+import { channel, model } from './fixtures';
 
 describe('AppService', () => {
   it.each(CHANNEL_PRESETS.filter((preset) => !['custom', 'opencode-go', 'opencode-console'].includes(preset.id)))('保存 $label 预设', async ({ id, values }) => {
@@ -20,8 +20,6 @@ describe('AppService', () => {
       updateChannels: async (update: (value: typeof channels) => typeof channels) => { channels = update(channels); return channels; },
       getApiKey: async () => undefined,
       deleteApiKey: async () => undefined,
-      getSyncProfile: () => undefined,
-      saveSyncProfile: async () => undefined,
       getSyncVault: () => undefined,
       saveSyncVault: async () => undefined,
     };
@@ -40,8 +38,6 @@ describe('AppService', () => {
       updateChannels: async (update: (value: typeof channels) => typeof channels) => { channels = update(channels); return channels; },
       getApiKey: async () => undefined,
       deleteApiKey: async () => undefined,
-      getSyncProfile: () => undefined,
-      saveSyncProfile: async () => undefined,
       getSyncVault: () => undefined,
       saveSyncVault: async () => undefined,
     };
@@ -55,11 +51,9 @@ describe('AppService', () => {
 
   it('保存渠道后续失败时恢复渠道、凭据和同步数据', async () => {
     const originalChannel = channel();
-    const originalProfile = { version: 2, updatedAt: 1, channels: [originalChannel], models: [] };
     const originalVault = { version: 1, updatedAt: 1 };
     let channels = [originalChannel];
     let apiKey: string | undefined = 'old-secret';
-    let profile: unknown = originalProfile;
     let vault: unknown = originalVault;
     const storage = {
       getChannels: () => channels,
@@ -67,8 +61,6 @@ describe('AppService', () => {
       getApiKey: async () => apiKey,
       saveApiKey: async (_channelId: string, value: string) => { apiKey = value; },
       deleteApiKey: async () => { apiKey = undefined; },
-      getSyncProfile: () => profile,
-      saveSyncProfile: async (value: unknown) => { profile = value; },
       getSyncVault: () => vault,
       saveSyncVault: async (value: unknown) => { vault = value; },
     };
@@ -79,7 +71,6 @@ describe('AppService', () => {
         vault = { version: 1, updatedAt: 2 };
       },
       saveProfileFromLocal: async () => {
-        profile = { version: 2, updatedAt: 2 };
         throw new Error('模拟同步配置写入失败');
       },
     };
@@ -91,8 +82,42 @@ describe('AppService', () => {
 
     expect(channels).toEqual([originalChannel]);
     expect(apiKey).toBe('old-secret');
-    expect(profile).toBe(originalProfile);
     expect(vault).toBe(originalVault);
     expect(chatBindings.reconcile).not.toHaveBeenCalled();
+  });
+
+  it('保存与目录基线一致的元数据时清除覆盖标记', async () => {
+    let models = [model({
+      metadataOverridden: true,
+      protocol: 'openai',
+      maxInputTokens: 64_000,
+      catalogMetadata: {
+        protocol: 'anthropic',
+        maxInputTokens: 128_000,
+        maxOutputTokens: 8_192,
+        toolCalling: true,
+      },
+    })];
+    const storage = {
+      getChannels: () => [channel()],
+      updateModels: async (update: (value: typeof models) => typeof models) => { models = update(models); return models; },
+    };
+    const sync = { saveProfileFromLocal: async () => undefined };
+    const app = new AppService(storage as any, {} as any, { reconcile: vi.fn() } as any, sync as any);
+
+    await app.saveModel({
+      channelId: 'channel-1',
+      id: 'model-1',
+      protocol: 'anthropic',
+      maxInputTokens: 128_000,
+      maxOutputTokens: 8_192,
+      toolCalling: true,
+    });
+
+    expect(models[0]).toMatchObject({
+      protocol: 'anthropic',
+      maxInputTokens: 128_000,
+      metadataOverridden: false,
+    });
   });
 });

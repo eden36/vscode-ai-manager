@@ -88,7 +88,7 @@ export class ChatBindingService implements vscode.Disposable {
 
   private async applyInternal(selections: ChatSettingSelections): Promise<void> {
     const selected = SETTING_ENTRIES.flatMap((entry) => selections[entry.field] ? [{ ...entry, target: selections[entry.field]! }] : []);
-    if (selected.length === 0) throw new Error('请至少选择一个要修改的 Chat 模型');
+    if (selected.length === 0) return;
     const channels = this.storage.getChannels();
     const models = this.storage.getModels();
     const resolved = selected.map((entry) => {

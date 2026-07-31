@@ -67,10 +67,26 @@
       {
         "command": "aiManager.showLogs",
         "title": "AI Manager: 显示日志"
+      },
+      {
+        "command": "aiManager.resetSync",
+        "title": "重置同步凭据",
+        "icon": "$(key)"
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "aiManager.resetSync",
+          "when": "false"
+        }
+      ],
       "view/title": [
+        {
+          "command": "aiManager.resetSync",
+          "when": "view == aiManager.dashboard",
+          "group": "navigation"
+        },
         {
           "command": "aiManager.refreshAll",
           "when": "view == aiManager.dashboard",
@@ -95,7 +111,8 @@
     "lint": "eslint src test",
     "check:unit": "npm run typecheck && npm run lint && npm test && npm run build",
     "check": "npm run check:unit && npm run test:integration",
-    "package:vsix": "npm run check && vsce package --no-dependencies"
+    "package:vsix": "npm run check && vsce package --no-dependencies",
+    "dev:vscode": "npm run build && node scripts/open-vscode-dev-host.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
