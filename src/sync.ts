@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { deflateRaw, inflateRaw } from 'node:zlib';
 import type { SharedStateV3 } from './shared-state';
@@ -7,17 +7,31 @@ import type { CatalogModel, SyncStatus } from './types';
 import type { StorageService } from './storage';
 import { createModelProviderId, getProtocolPath } from './models';
 
-const VAULT_VERSION = 1;
-const MANIFEST_VERSION = 3;
+const VAULT_VERSION = 2;
+const MANIFEST_VERSION = 4;
 const PBKDF2_ITERATIONS = 600_000;
 const KEY_LENGTH = 32;
 const CHUNK_SIZE = 48 * 1024;
-const AAD = Buffer.from('ai-manager:v1', 'utf8');
+const MAX_SYNC_CHUNKS = 256;
+const AAD = Buffer.from('ai-manager:v2', 'utf8');
 const deflate = promisify(deflateRaw);
 const inflate = promisify(inflateRaw);
 
-export interface EncryptedVault {
-  version: 1;
+export interface VersionedCredential {
+  revision: number;
+  deviceId: string;
+  value?: string;
+  deleted?: true;
+}
+
+export interface VaultPayloadV2 {
+  version: 2;
+  clock: number;
+  credentials: Record<string, VersionedCredential>;
+}
+
+export interface EncryptedVaultV2 {
+  version: 2;
   updatedAt: number;
   kdf: {
     name: 'PBKDF2-SHA256';
@@ -32,26 +46,56 @@ export interface EncryptedVault {
   };
 }
 
-export interface SyncManifestV3 {
-  version: 3;
+export interface SyncedVaultBundleV2 {
+  version: 2;
+  generation: number;
+  key: string;
+  vault: EncryptedVaultV2;
+}
+
+export interface SyncManifestV4 {
+  version: 4;
   generation: number;
   updatedAt: number;
+  snapshotId: string;
   chunkCount: number;
   encoding: 'deflate-raw-base64';
   checksum: string;
   reset?: true;
 }
 
-interface VaultPayload {
-  credentials: Record<string, string>;
+export interface SyncReconcileResult {
+  stateChanged: boolean;
+  vaultChanged: boolean;
 }
 
-export function encryptWithKey(credentials: Record<string, string>, key: Buffer, salt: Buffer, updatedAt = Date.now()): EncryptedVault {
+export function startSyncPolling(
+  run: () => Promise<SyncReconcileResult>,
+  onResult: (result: SyncReconcileResult) => void,
+  onError: (error: unknown) => void,
+  intervalMs = 30_000,
+): { dispose(): void } {
+  let running = false;
+  const timer = setInterval(() => {
+    if (running) return;
+    running = true;
+    void run().then(onResult, onError).finally(() => { running = false; });
+  }, intervalMs);
+  return { dispose: () => clearInterval(timer) };
+}
+
+export function encryptWithKey(
+  payload: VaultPayloadV2,
+  key: Buffer,
+  salt: Buffer,
+  updatedAt = Date.now(),
+): EncryptedVaultV2 {
   if (key.length !== KEY_LENGTH || salt.length !== 16) throw new Error('同步密钥格式错误');
+  validateVaultPayload(payload);
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   cipher.setAAD(AAD);
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify({ credentials } satisfies VaultPayload), 'utf8'), cipher.final()]);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final()]);
   return {
     version: VAULT_VERSION,
     updatedAt,
@@ -60,28 +104,38 @@ export function encryptWithKey(credentials: Record<string, string>, key: Buffer,
   };
 }
 
-export function decryptWithKey(vault: EncryptedVault, key: Buffer): Record<string, string> {
+export function decryptWithKey(vault: EncryptedVaultV2, key: Buffer): VaultPayloadV2 {
   validateVault(vault);
   if (key.length !== KEY_LENGTH) throw new Error('同步密钥格式错误');
   try {
-    const iv = Buffer.from(vault.cipher.iv, 'base64');
-    const tag = Buffer.from(vault.cipher.tag, 'base64');
-    const ciphertext = Buffer.from(vault.cipher.ciphertext, 'base64');
-    const decipher = createDecipheriv('aes-256-gcm', key, iv);
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(vault.cipher.iv, 'base64'));
     decipher.setAAD(AAD);
-    decipher.setAuthTag(tag);
-    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
-    const payload = JSON.parse(plaintext) as Partial<VaultPayload>;
-    if (!payload.credentials || typeof payload.credentials !== 'object' || Array.isArray(payload.credentials)) throw new Error();
-    const credentials = Object.fromEntries(Object.entries(payload.credentials).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
-    if (Object.keys(credentials).length !== Object.keys(payload.credentials).length) throw new Error();
-    return credentials;
+    decipher.setAuthTag(Buffer.from(vault.cipher.tag, 'base64'));
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(vault.cipher.ciphertext, 'base64')),
+      decipher.final(),
+    ]).toString('utf8');
+    const payload = JSON.parse(plaintext) as VaultPayloadV2;
+    validateVaultPayload(payload);
+    return payload;
   } catch {
     throw new Error('同步保险库已损坏');
   }
 }
 
-export async function encodeSharedState(state: SharedStateV3): Promise<{ manifest: SyncManifestV3; chunks: string[] }> {
+export function mergeVaultPayloads(left: VaultPayloadV2, right: VaultPayloadV2): VaultPayloadV2 {
+  const credentials = { ...left.credentials };
+  for (const [channelId, candidate] of Object.entries(right.credentials)) {
+    const current = credentials[channelId];
+    if (!current || compareCredential(candidate, current) > 0) credentials[channelId] = candidate;
+  }
+  return { version: 2, clock: Math.max(left.clock, right.clock), credentials };
+}
+
+export async function encodeSharedState(
+  state: SharedStateV3,
+  snapshotId: string = randomUUID(),
+): Promise<{ manifest: SyncManifestV4; chunks: string[] }> {
   const compressed = await deflate(Buffer.from(serializeSharedState(state), 'utf8'));
   const payload = compressed.toString('base64');
   const chunks = Array.from({ length: Math.ceil(payload.length / CHUNK_SIZE) }, (_, index) => payload.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE));
@@ -90,6 +144,7 @@ export async function encodeSharedState(state: SharedStateV3): Promise<{ manifes
       version: MANIFEST_VERSION,
       generation: state.syncGeneration,
       updatedAt: Date.now(),
+      snapshotId,
       chunkCount: chunks.length,
       encoding: 'deflate-raw-base64',
       checksum: createHash('sha256').update(compressed).digest('hex'),
@@ -98,44 +153,33 @@ export async function encodeSharedState(state: SharedStateV3): Promise<{ manifes
   };
 }
 
-export async function decodeSharedState(manifest: SyncManifestV3, chunks: readonly string[]): Promise<SharedStateV3> {
+export async function decodeSharedState(manifest: SyncManifestV4, chunks: readonly string[]): Promise<SharedStateV3> {
   validateManifest(manifest);
   if (manifest.reset) return { ...createEmptySharedState(), syncGeneration: manifest.generation };
   if (chunks.length !== manifest.chunkCount || chunks.some((chunk) => typeof chunk !== 'string')) throw new Error('同步状态分块不完整');
   const compressed = Buffer.from(chunks.join(''), 'base64');
-  const checksum = createHash('sha256').update(compressed).digest('hex');
-  if (checksum !== manifest.checksum) throw new Error('同步状态校验失败');
+  if (createHash('sha256').update(compressed).digest('hex') !== manifest.checksum) throw new Error('同步状态校验失败');
   return parseSharedState(JSON.parse((await inflate(compressed)).toString('utf8')));
 }
 
 export class SyncService {
   private operationQueue: Promise<void> = Promise.resolve();
-  private lastImportedVaultAt = 0;
   private lastPublishedState = '';
   private lastAppliedManifest = '';
   private locked = false;
   private lastError: string | undefined;
+  private consecutiveFailures = 0;
 
   constructor(private readonly storage: StorageService) {
     storage.registerSyncKeys();
   }
 
   async initialize(): Promise<void> {
-    await this.enqueue(async () => {
-      try {
-        await this.applyRemoteState();
-      } catch (error) {
-        this.lastError = error instanceof Error ? error.message : '同步状态读取失败';
-      }
-      await this.reconcileVault();
-      await this.ensureAutomaticSync();
-      if (this.getStatus().enabled && !this.lastError) await this.publishState();
-    });
+    await this.enqueue(() => this.synchronize(false));
   }
 
   getStatus(): SyncStatus {
-    const vault = this.storage.getSyncVault() ?? this.storage.getSyncedVault();
-    const hasVault = Boolean(vault);
+    const hasVault = Boolean(this.storage.getSyncVault() ?? this.storage.getSyncedVaultBundle());
     const error = this.lastError ?? this.storage.getLastError();
     return {
       enabled: hasVault,
@@ -147,65 +191,59 @@ export class SyncService {
     };
   }
 
-  async reconcile(): Promise<void> {
-    await this.enqueue(async () => {
-      this.lastError = undefined;
-      try {
-        await this.applyRemoteState();
-        await this.reconcileVault();
-        await this.ensureAutomaticSync();
-        if (this.getStatus().enabled) await this.publishState();
-      } catch (error) {
-        this.lastError = error instanceof Error ? error.message : '同步失败';
-      }
-    });
+  async reconcile(): Promise<SyncReconcileResult> {
+    return this.enqueue(() => this.synchronize(false));
   }
 
   async reset(): Promise<void> {
     await this.enqueue(async () => {
       for (const channel of this.storage.getChannels()) await this.storage.deleteApiKey(channel.id);
-      await this.clearSyncKeys();
       const generation = await this.storage.incrementSyncGeneration();
-      await this.storage.saveSyncChunks([]);
-      await this.storage.saveSyncManifest({
+      const manifest: SyncManifestV4 = {
         version: MANIFEST_VERSION,
         generation,
         updatedAt: Date.now(),
+        snapshotId: randomUUID(),
         chunkCount: 0,
         encoding: 'deflate-raw-base64',
         checksum: '',
         reset: true,
-      });
-      await this.storage.saveSyncedVault(undefined);
-      await this.storage.saveSyncVault(undefined);
+      };
+      await this.storage.saveSyncSnapshot(manifest, []);
+      await this.storage.saveSyncedVaultBundle(undefined);
+      await this.storage.saveLocalVaultBundle(undefined);
       await this.storage.saveAppliedResetGeneration(generation);
-      this.lastImportedVaultAt = 0;
+      await this.finishV4Initialization();
       this.lastPublishedState = '';
+      this.lastAppliedManifest = manifestKey(manifest);
       this.locked = false;
+      this.lastError = undefined;
+      this.consecutiveFailures = 0;
     });
   }
 
   async saveCredential(channelId: string, apiKey: string | undefined): Promise<void> {
     await this.enqueue(async () => {
+      await this.applyRemoteState();
+      await this.reconcileVault();
       const normalized = apiKey?.trim() || undefined;
-      if (!this.getStatus().enabled) {
-        if (normalized) await this.storage.saveApiKey(channelId, normalized);
-        else await this.storage.deleteApiKey(channelId);
-        return;
-      }
-      const vault = this.storage.getSyncVault()!;
-      const key = await this.requireLocalKey();
-      const credentials = decryptWithKey(vault, key);
-      if (normalized) credentials[channelId] = normalized;
-      else delete credentials[channelId];
       const previous = await this.storage.getApiKey(channelId);
       try {
+        const bundle = await this.storage.updateSyncVaultBundle(async (current) => {
+          const base = current ?? this.createBundle(createEmptyVaultPayload(), this.storage.getSyncGeneration());
+          const payload = decryptBundle(base);
+          payload.clock += 1;
+          payload.credentials[channelId] = {
+            revision: payload.clock,
+            deviceId: this.storage.deviceId,
+            ...(normalized ? { value: normalized } : { deleted: true }),
+          };
+          return this.encryptBundle(payload, base.key, base.generation, Buffer.from(base.vault.kdf.salt, 'base64'));
+        });
         if (normalized) await this.storage.saveApiKey(channelId, normalized);
         else await this.storage.deleteApiKey(channelId);
-        const updated = encryptWithKey(credentials, key, Buffer.from(vault.kdf.salt, 'base64'), Math.max(Date.now(), vault.updatedAt + 1));
-        await this.storage.saveSyncVault(updated);
-        await this.storage.saveSyncedVault(updated);
-        this.lastImportedVaultAt = updated.updatedAt;
+        await this.storage.saveSyncedVaultBundle(bundle);
+        this.locked = false;
       } catch (error) {
         if (previous) await this.storage.saveApiKey(channelId, previous);
         else await this.storage.deleteApiKey(channelId);
@@ -219,9 +257,7 @@ export class SyncService {
   }
 
   async saveProfileFromLocal(): Promise<void> {
-    await this.enqueue(async () => {
-      if (this.getStatus().enabled) await this.publishState();
-    });
+    await this.enqueue(() => this.synchronize(true));
   }
 
   applyPreference(model: CatalogModel, channels = this.storage.getChannels()): CatalogModel {
@@ -246,134 +282,127 @@ export class SyncService {
     };
   }
 
+  private async synchronize(throwOnError: boolean): Promise<SyncReconcileResult> {
+    try {
+      const stateChanged = await this.applyRemoteState();
+      const vaultChanged = await this.reconcileVault();
+      await this.publishState();
+      await this.finishV4Initialization();
+      this.consecutiveFailures = 0;
+      this.lastError = undefined;
+      return { stateChanged, vaultChanged };
+    } catch (error) {
+      this.consecutiveFailures += 1;
+      if (this.consecutiveFailures >= 3) this.lastError = error instanceof Error ? error.message : '同步失败';
+      if (throwOnError) throw error;
+      return { stateChanged: false, vaultChanged: false };
+    }
+  }
+
   private async applyRemoteState(): Promise<boolean> {
     const manifest = this.storage.getSyncManifest();
-    if (!manifest || manifest.version !== MANIFEST_VERSION) return false;
-    this.storage.registerSyncKeys(manifest.chunkCount);
+    if (!manifest) return false;
+    validateManifest(manifest);
+    this.storage.registerSyncKeys(manifest);
     if (manifest.generation < this.storage.getSyncGeneration()) return false;
     const key = manifestKey(manifest);
-    if (key === this.lastAppliedManifest) return true;
-    const chunks = Array.from({ length: manifest.chunkCount }, (_, index) => this.storage.getSyncChunk(index));
+    if (key === this.lastAppliedManifest) return false;
+    const chunks = Array.from({ length: manifest.chunkCount }, (_, index) => this.storage.getSyncChunk(manifest.snapshotId, index));
     if (chunks.some((chunk) => chunk === undefined)) throw new Error('同步状态分块尚未完整到达');
     const remote = await decodeSharedState(manifest, chunks as string[]);
     if (manifest.reset) {
       if (manifest.generation <= this.storage.getAppliedResetGeneration()) {
         this.lastAppliedManifest = key;
-        return true;
+        return false;
       }
-      await this.storage.mergeRemoteState(remote);
-      await this.storage.saveSyncVault(undefined);
-      await this.clearSyncKeys();
+      const changed = await this.storage.mergeRemoteState(remote);
+      await this.storage.saveSyncedVaultBundle(undefined);
+      await this.storage.saveLocalVaultBundle(undefined);
       for (const channel of this.storage.getChannels()) await this.storage.deleteApiKey(channel.id);
       await this.storage.saveAppliedResetGeneration(manifest.generation);
       this.lastAppliedManifest = key;
       this.locked = false;
-      return true;
+      return changed;
     }
-    await this.storage.mergeRemoteState(remote);
+    const changed = await this.storage.mergeRemoteState(remote);
     this.lastAppliedManifest = key;
     this.lastPublishedState = serializeSharedState(remote);
-    return true;
+    return changed;
   }
 
   private async publishState(): Promise<void> {
     const state = syncPayloadState(this.storage.getSharedState());
     const serialized = serializeSharedState(state);
-    const currentManifest = this.storage.getSyncManifest();
+    const current = this.storage.getSyncManifest();
+    if (current?.reset
+      && current.generation === state.syncGeneration
+      && !this.storage.getSyncVault()
+      && !this.storage.getSyncedVaultBundle()) return;
     if (serialized === this.lastPublishedState
-      && currentManifest?.generation === state.syncGeneration
-      && !currentManifest.reset) return;
+      && current?.generation === state.syncGeneration
+      && !current.reset) return;
     const { manifest, chunks } = await encodeSharedState(state);
-    await this.storage.saveSyncChunks(chunks);
-    await this.storage.saveSyncManifest(manifest);
-    const vault = this.storage.getSyncVault();
-    if (vault) await this.storage.saveSyncedVault(vault);
+    await this.storage.saveSyncSnapshot(manifest, chunks);
     this.lastPublishedState = serialized;
     this.lastAppliedManifest = manifestKey(manifest);
   }
 
-  private async reconcileVault(): Promise<void> {
-    const local = this.storage.getSyncVault();
-    const remote = this.storage.getSyncedVault();
-    try {
-      if (remote && (!local || remote.updatedAt > local.updatedAt)) await this.storage.saveSyncVault(remote);
-      else if (local && (!remote || local.updatedAt > remote.updatedAt)) await this.storage.saveSyncedVault(local);
-    } catch (error) {
-      this.lastError = error instanceof Error ? error.message : '同步保险库写入失败';
-    }
-    await this.importVaultWithLocalKey();
-  }
-
-  private async ensureAutomaticSync(): Promise<void> {
-    if (this.storage.getSyncVault() ?? this.storage.getSyncedVault()) return;
-    const credentials = await this.readLocalCredentials();
-    const key = randomBytes(KEY_LENGTH);
-    const salt = randomBytes(16);
-    const created = encryptWithKey(credentials, key, salt);
-    const current = this.storage.getSyncedVault();
-    const vault: EncryptedVault = { ...created, updatedAt: Math.max(created.updatedAt, (current?.updatedAt ?? 0) + 1) };
-    await this.storage.saveSyncVault(vault);
-    await this.storage.saveSyncedVault(vault);
-    await this.persistSyncKey(key);
-    this.lastImportedVaultAt = vault.updatedAt;
-    this.locked = false;
-  }
-
-  private async importVaultWithLocalKey(): Promise<void> {
-    const vault = this.storage.getSyncVault();
-    if (!vault) {
-      if (await this.storage.getSyncLocalKey()) {
-        for (const channel of this.storage.getChannels()) await this.storage.deleteApiKey(channel.id);
-        await this.clearSyncKeys();
+  private async reconcileVault(): Promise<boolean> {
+    const remote = this.storage.getSyncedVaultBundle();
+    const generation = this.storage.getSyncGeneration();
+    if (remote) validateBundle(remote);
+    if (remote && remote.generation > generation) throw new Error('同步保险库代次超前，等待状态分块到达');
+    const applicableRemote = remote?.generation === generation ? remote : undefined;
+    const localCredentials = await this.readLocalCredentials();
+    const manifest = this.storage.getSyncManifest();
+    if (!applicableRemote
+      && !this.storage.getSyncVault()
+      && Object.keys(localCredentials).length === 0
+      && manifest?.reset
+      && manifest.generation === generation) return false;
+    let changed = false;
+    const bundle = await this.storage.updateSyncVaultBundle(async (local) => {
+      if (local) validateBundle(local);
+      const localPayload = local?.generation === generation ? decryptBundle(local) : createEmptyVaultPayload();
+      const remotePayload = applicableRemote ? decryptBundle(applicableRemote) : createEmptyVaultPayload();
+      const merged = mergeVaultPayloads(localPayload, remotePayload);
+      for (const [channelId, apiKey] of Object.entries(localCredentials)) {
+        if (merged.credentials[channelId]) continue;
+        merged.clock += 1;
+        merged.credentials[channelId] = { revision: merged.clock, deviceId: this.storage.deviceId, value: apiKey };
       }
-      this.lastImportedVaultAt = 0;
-      this.locked = false;
-      return;
+      if (serializeVaultPayload(localPayload) !== serializeVaultPayload(merged)) changed = true;
+      const preferred = applicableRemote ?? (local?.generation === generation ? local : undefined);
+      if (preferred && serializeVaultPayload(decryptBundle(preferred)) === serializeVaultPayload(merged)) return preferred;
+      changed = true;
+      const key = preferred?.key ?? randomBytes(KEY_LENGTH).toString('base64');
+      const salt = preferred ? Buffer.from(preferred.vault.kdf.salt, 'base64') : randomBytes(16);
+      return this.encryptBundle(merged, key, generation, salt);
+    });
+    if (!applicableRemote || serializeBundle(applicableRemote) !== serializeBundle(bundle)) {
+      await this.storage.saveSyncedVaultBundle(bundle);
+      changed = true;
     }
-    const key = await this.resolveSyncKey();
-    if (!key) {
-      this.locked = true;
-      return;
-    }
-    try {
-      const credentials = decryptWithKey(vault, key);
-      await this.importCredentials(credentials);
-      this.lastImportedVaultAt = vault.updatedAt;
-      this.locked = false;
-    } catch {
-      await this.clearSyncKeys();
-      this.locked = true;
-    }
+    await this.importCredentials(decryptBundle(bundle));
+    this.locked = false;
+    return changed;
   }
 
-  private async resolveSyncKey(): Promise<Buffer | undefined> {
-    const encoded = await this.storage.getSyncLocalKey()
-      ?? this.storage.getSyncedEncryptionKey()
-      ?? await this.storage.readSharedVaultKey();
-    if (!encoded) return undefined;
-    const key = Buffer.from(encoded, 'base64');
-    if (key.length !== KEY_LENGTH) return undefined;
-    await this.persistSyncKey(key);
-    return key;
+  private createBundle(payload: VaultPayloadV2, generation: number): SyncedVaultBundleV2 {
+    const key = randomBytes(KEY_LENGTH).toString('base64');
+    return this.encryptBundle(payload, key, generation, randomBytes(16));
   }
 
-  private async persistSyncKey(key: Buffer): Promise<void> {
-    const encoded = key.toString('base64');
-    await this.storage.saveSyncLocalKey(encoded);
-    await this.storage.saveSyncedEncryptionKey(encoded);
-    await this.storage.writeSharedVaultKey(encoded);
+  private encryptBundle(payload: VaultPayloadV2, encodedKey: string, generation: number, salt: Buffer): SyncedVaultBundleV2 {
+    const key = decodeBundleKey(encodedKey);
+    return { version: 2, generation, key: encodedKey, vault: encryptWithKey(payload, key, salt) };
   }
 
-  private async clearSyncKeys(): Promise<void> {
-    await this.storage.deleteSyncLocalKey();
-    await this.storage.saveSyncedEncryptionKey(undefined);
-    await this.storage.deleteSharedVaultKey();
-  }
-
-  private async importCredentials(credentials: Record<string, string>): Promise<void> {
+  private async importCredentials(payload: VaultPayloadV2): Promise<void> {
     for (const channel of this.storage.getChannels()) {
-      const apiKey = credentials[channel.id];
-      if (apiKey) await this.storage.saveApiKey(channel.id, apiKey);
+      const record = payload.credentials[channel.id];
+      if (!record) continue;
+      if (!record.deleted && record.value) await this.storage.saveApiKey(channel.id, record.value);
       else await this.storage.deleteApiKey(channel.id);
     }
   }
@@ -383,10 +412,10 @@ export class SyncService {
     return Object.fromEntries(entries.filter((entry): entry is [string, string] => Boolean(entry[1])));
   }
 
-  private async requireLocalKey(): Promise<Buffer> {
-    const key = await this.resolveSyncKey();
-    if (!key || this.locked) throw new Error('同步密钥尚未就绪');
-    return key;
+  private async finishV4Initialization(): Promise<void> {
+    if (this.storage.getSyncV4Initialized()) return;
+    await this.storage.clearLegacySyncData();
+    await this.storage.saveSyncV4Initialized(true);
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -394,6 +423,37 @@ export class SyncService {
     this.operationQueue = result.then(() => undefined, () => undefined);
     return result;
   }
+}
+
+function createEmptyVaultPayload(): VaultPayloadV2 {
+  return { version: 2, clock: 0, credentials: {} };
+}
+
+function decryptBundle(bundle: SyncedVaultBundleV2): VaultPayloadV2 {
+  validateBundle(bundle);
+  return decryptWithKey(bundle.vault, decodeBundleKey(bundle.key));
+}
+
+function decodeBundleKey(encoded: string): Buffer {
+  const key = Buffer.from(encoded, 'base64');
+  if (key.length !== KEY_LENGTH) throw new Error('同步密钥格式错误');
+  return key;
+}
+
+function compareCredential(left: VersionedCredential, right: VersionedCredential): number {
+  if (left.revision !== right.revision) return left.revision - right.revision;
+  return left.deviceId.localeCompare(right.deviceId);
+}
+
+function serializeVaultPayload(payload: VaultPayloadV2): string {
+  return JSON.stringify({
+    ...payload,
+    credentials: Object.fromEntries(Object.entries(payload.credentials).sort(([left], [right]) => left.localeCompare(right))),
+  });
+}
+
+function serializeBundle(bundle: SyncedVaultBundleV2): string {
+  return JSON.stringify(bundle);
 }
 
 function syncPayloadState(state: SharedStateV3): SharedStateV3 {
@@ -404,11 +464,11 @@ function syncPayloadState(state: SharedStateV3): SharedStateV3 {
   return { ...payload, clock };
 }
 
-function manifestKey(manifest: SyncManifestV3): string {
-  return `${manifest.generation}\0${manifest.updatedAt}\0${manifest.checksum}`;
+function manifestKey(manifest: SyncManifestV4): string {
+  return `${manifest.generation}\0${manifest.snapshotId}\0${manifest.checksum}`;
 }
 
-function validateVault(vault: EncryptedVault): Buffer {
+function validateVault(vault: EncryptedVaultV2): void {
   const salt = Buffer.from(vault?.kdf?.salt ?? '', 'base64');
   const iv = Buffer.from(vault?.cipher?.iv ?? '', 'base64');
   const tag = Buffer.from(vault?.cipher?.tag ?? '', 'base64');
@@ -419,18 +479,42 @@ function validateVault(vault: EncryptedVault): Buffer {
     || salt.length !== 16
     || iv.length !== 12
     || tag.length !== 16
+    || typeof vault.updatedAt !== 'number'
     || typeof vault.cipher.ciphertext !== 'string') {
     throw new Error('同步保险库格式错误');
   }
-  return salt;
 }
 
-function validateManifest(manifest: SyncManifestV3): void {
+function validateVaultPayload(payload: VaultPayloadV2): void {
+  if (!payload || payload.version !== 2 || !Number.isInteger(payload.clock) || payload.clock < 0
+    || !payload.credentials || typeof payload.credentials !== 'object' || Array.isArray(payload.credentials)) {
+    throw new Error('同步保险库格式错误');
+  }
+  for (const [channelId, record] of Object.entries(payload.credentials)) {
+    if (!channelId || !record || !Number.isInteger(record.revision) || record.revision < 0
+      || typeof record.deviceId !== 'string'
+      || (record.deleted !== true && typeof record.value !== 'string')) {
+      throw new Error('同步保险库格式错误');
+    }
+  }
+}
+
+function validateBundle(bundle: SyncedVaultBundleV2): void {
+  if (bundle?.version !== 2 || !Number.isInteger(bundle.generation) || bundle.generation < 0 || typeof bundle.key !== 'string') {
+    throw new Error('同步保险库格式错误');
+  }
+  decodeBundleKey(bundle.key);
+  validateVault(bundle.vault);
+}
+
+function validateManifest(manifest: SyncManifestV4): void {
   if (manifest.version !== MANIFEST_VERSION
     || !Number.isInteger(manifest.generation)
     || manifest.generation < 0
+    || !/^[a-zA-Z0-9-]{1,80}$/.test(manifest.snapshotId)
     || !Number.isInteger(manifest.chunkCount)
     || manifest.chunkCount < 0
+    || manifest.chunkCount > MAX_SYNC_CHUNKS
     || manifest.encoding !== 'deflate-raw-base64'
     || typeof manifest.checksum !== 'string') {
     throw new Error('同步状态清单格式错误');

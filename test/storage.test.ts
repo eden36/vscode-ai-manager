@@ -116,7 +116,7 @@ describe('StorageService', () => {
 
   it('保险库读取失败不会被状态文件读取成功掩盖', async () => {
     storage.dispose();
-    await writeFile(path.join(storageDirectory, 'vault-v1.json'), '{broken', 'utf8');
+    await writeFile(path.join(storageDirectory, 'vault-v2.json'), '{broken', 'utf8');
     const recovered = isolatedStorage(storageDirectory, 'vault-recovery');
     await recovered.initialize();
 
@@ -154,8 +154,8 @@ describe('StorageService', () => {
   });
 
   it('保险库读取失败时保留已加载的保险库，不误判为已删除', async () => {
-    const vaultPath = path.join(storageDirectory, 'vault-v1.json');
-    await storage.saveSyncVault({ version: 1, updatedAt: 1 } as any);
+    const vaultPath = path.join(storageDirectory, 'vault-v2.json');
+    await storage.saveSyncVault({ version: 2, updatedAt: 1 } as any);
     const watched = new StorageService({
       globalState: { get: (_key: string, fallback: unknown) => fallback, update: async () => undefined, setKeysForSync: () => undefined },
       secrets: { get: async () => undefined, store: async () => undefined, delete: async () => undefined },
@@ -177,7 +177,7 @@ describe('StorageService', () => {
     } as any, { directory: storageDirectory, deviceId: 'watched', watch: true });
     await watched.initialize();
 
-    await storage.saveSyncVault({ version: 1, updatedAt: 7 } as any);
+    await storage.saveSyncVault({ version: 2, updatedAt: 7 } as any);
 
     await vi.waitFor(() => expect(watched.getSyncVault()).toMatchObject({ updatedAt: 7 }));
     watched.dispose();
@@ -193,7 +193,7 @@ describe('StorageService', () => {
     const outdated = isolatedStorage(storageDirectory, 'outdated-vault');
     await outdated.initialize();
 
-    await expect(outdated.saveSyncVault({ version: 1, updatedAt: 1 } as any)).rejects.toThrow('请升级扩展');
+    await expect(outdated.saveSyncVault({ version: 2, updatedAt: 1 } as any)).rejects.toThrow('请升级扩展');
     outdated.dispose();
   });
 

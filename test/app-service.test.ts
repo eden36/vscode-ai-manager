@@ -21,7 +21,9 @@ describe('AppService', () => {
       getApiKey: async () => undefined,
       deleteApiKey: async () => undefined,
       getSyncVault: () => undefined,
+      getSyncedVaultBundle: () => undefined,
       saveSyncVault: async () => undefined,
+      saveSyncedVaultBundle: async () => undefined,
     };
     const sync = { assertUnlocked: () => undefined, saveProfileFromLocal: async () => undefined };
     const app = new AppService(storage as any, {} as any, { reconcile: vi.fn() } as any, sync as any);
@@ -39,7 +41,9 @@ describe('AppService', () => {
       getApiKey: async () => undefined,
       deleteApiKey: async () => undefined,
       getSyncVault: () => undefined,
+      getSyncedVaultBundle: () => undefined,
       saveSyncVault: async () => undefined,
+      saveSyncedVaultBundle: async () => undefined,
     };
     const sync = { assertUnlocked: () => undefined, saveProfileFromLocal: async () => undefined };
     const app = new AppService(storage as any, {} as any, { reconcile: vi.fn() } as any, sync as any);
@@ -55,6 +59,7 @@ describe('AppService', () => {
     let channels = [originalChannel];
     let apiKey: string | undefined = 'old-secret';
     let vault: unknown = originalVault;
+    let syncedVault: unknown = originalVault;
     const storage = {
       getChannels: () => channels,
       updateChannels: async (update: (value: typeof channels) => typeof channels) => { channels = update(channels); return channels; },
@@ -62,13 +67,16 @@ describe('AppService', () => {
       saveApiKey: async (_channelId: string, value: string) => { apiKey = value; },
       deleteApiKey: async () => { apiKey = undefined; },
       getSyncVault: () => vault,
+      getSyncedVaultBundle: () => syncedVault,
       saveSyncVault: async (value: unknown) => { vault = value; },
+      saveSyncedVaultBundle: async (value: unknown) => { syncedVault = value; },
     };
     const sync = {
       assertUnlocked: () => undefined,
       saveCredential: async (_channelId: string, value: string) => {
         apiKey = value;
         vault = { version: 1, updatedAt: 2 };
+        syncedVault = { version: 1, updatedAt: 2 };
       },
       saveProfileFromLocal: async () => {
         throw new Error('模拟同步配置写入失败');
@@ -83,6 +91,7 @@ describe('AppService', () => {
     expect(channels).toEqual([originalChannel]);
     expect(apiKey).toBe('old-secret');
     expect(vault).toBe(originalVault);
+    expect(syncedVault).toBe(originalVault);
     expect(chatBindings.reconcile).not.toHaveBeenCalled();
   });
 

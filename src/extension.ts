@@ -5,7 +5,7 @@ import { CatalogService } from './catalog';
 import { ChatBindingService, type ChatSettingSelections } from './chat-settings';
 import { AiManagerLanguageProvider } from './language-provider';
 import { StorageService } from './storage';
-import { SyncService } from './sync';
+import { startSyncPolling, SyncService } from './sync';
 import { DashboardWebviewProvider } from './webview-provider';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -122,6 +122,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     app.onDidChange(() => syncRefreshTimer()),
     { dispose: () => { if (refreshTimer) clearInterval(refreshTimer); } },
   );
+
+  context.subscriptions.push(startSyncPolling(
+    () => sync.reconcile(),
+    (result) => {
+      // 共享状态合并会通过 storage.onDidChange 刷新界面；仅保险库变化时需主动刷新状态。
+      if (result.vaultChanged && !result.stateChanged) app.notifyExternalChange();
+    },
+    (error) => output.appendLine(`[${new Date().toISOString()}] 定时同步失败 类别=${error instanceof Error ? error.name : 'unknown'}`),
+  ));
 }
 
 export function deactivate(): void {}

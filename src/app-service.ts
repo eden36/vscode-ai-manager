@@ -65,6 +65,7 @@ export class AppService implements vscode.Disposable {
     const channelId = existing?.id ?? randomUUID();
     const previousApiKey = await this.storage.getApiKey(channelId);
     const previousVault = this.storage.getSyncVault();
+    const previousSyncedVault = this.storage.getSyncedVaultBundle();
     let channel: ChannelConfig | undefined;
     try {
       await this.storage.updateChannels((channels) => {
@@ -110,6 +111,7 @@ export class AppService implements vscode.Disposable {
           : channels.filter((item) => item.id !== channelId)),
         previousApiKey === undefined ? this.storage.deleteApiKey(channelId) : this.storage.saveApiKey(channelId, previousApiKey),
         this.storage.saveSyncVault(previousVault),
+        this.storage.saveSyncedVaultBundle(previousSyncedVault),
       ]);
       if (rollback.some((result) => result.status === 'rejected')) {
         throw new Error('渠道保存失败，且无法完整恢复原配置', { cause: error });

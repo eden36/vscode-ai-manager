@@ -22,23 +22,32 @@ import {
   type SharedStoreChange,
   type VersionedRecord,
 } from './shared-state';
-import type { EncryptedVault, SyncManifestV3 } from './sync';
+import type { EncryptedVaultV2, SyncedVaultBundleV2, SyncManifestV4 } from './sync';
 import type { CatalogModel, ChannelConfig, ChatBindingRecord, ChatSettingKey } from './types';
 
-const SYNC_MANIFEST_KEY = 'aiManager.sync.manifest.v3';
-const SYNC_VAULT_KEY = 'aiManager.sync.vault.v2';
-const SYNC_CHUNK_PREFIX = 'aiManager.sync.chunk.v3.';
-const SYNC_LOCAL_KEY = 'aiManager.sync.localKey.v1';
-const SYNC_ENCRYPTION_KEY = 'aiManager.sync.encryptionKey.v1';
-const VAULT_KEY_FILE = 'vault-key-v1';
+const SYNC_MANIFEST_KEY = 'aiManager.sync.manifest.v4';
+const SYNC_VAULT_BUNDLE_KEY = 'aiManager.sync.vaultBundle.v2';
+const SYNC_CHUNK_PREFIX = 'aiManager.sync.chunk.v4.';
+const SYNC_LOCAL_KEY = 'aiManager.sync.localKey.v2';
+const VAULT_KEY_FILE = 'vault-key-v2';
+const PROFILE_SNAPSHOTS_KEY = 'aiManager.profile.snapshots.v4';
+const LEGACY_MANIFEST_KEY = 'aiManager.sync.manifest.v3';
+const LEGACY_VAULT_KEY = 'aiManager.sync.vault.v2';
+const LEGACY_ENCRYPTION_KEY = 'aiManager.sync.encryptionKey.v1';
+const LEGACY_CHUNK_PREFIX = 'aiManager.sync.chunk.v3.';
+const LEGACY_LOCAL_KEY = 'aiManager.sync.localKey.v1';
+const LEGACY_VAULT_FILE = 'vault-v1.json';
+const LEGACY_VAULT_KEY_FILE = 'vault-key-v1';
 // 前缀刻意不使用 aiManager.sync.，避免与 setKeysForSync 注册的同步键混淆。
 const PROFILE_APPLIED_RESET_KEY = 'aiManager.profile.appliedReset.v1';
 const PROFILE_SYNC_ACKNOWLEDGED_KEY = 'aiManager.profile.syncAcknowledged.v1';
+const PROFILE_SYNC_V4_INITIALIZED_KEY = 'aiManager.profile.syncV4Initialized.v1';
 const STATE_FILE = 'state-v3.json';
-const VAULT_FILE = 'vault-v1.json';
+const VAULT_FILE = 'vault-v2.json';
 const LOCK_FILE = 'state.lock';
 const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 3_000;
+const MAX_SYNC_CHUNKS = 256;
 
 export interface StorageServiceOptions {
   directory?: string;
@@ -50,9 +59,14 @@ export interface StorageServiceOptions {
   watch?: boolean;
 }
 
+interface SyncSnapshotRef {
+  snapshotId: string;
+  chunkCount: number;
+}
+
 export class StorageService implements vscode.Disposable {
   private state = createEmptySharedState();
-  private vault: EncryptedVault | undefined;
+  private vault: EncryptedVaultV2 | undefined;
   private initialized = false;
   private stateWriteQueue: Promise<void> = Promise.resolve();
   private readonly listeners = new Set<(change: SharedStoreChange) => void>();
@@ -64,7 +78,6 @@ export class StorageService implements vscode.Disposable {
   private vaultError: string | undefined;
   private watchError: string | undefined;
   private readOnlyReason: string | undefined;
-  private syncedChunkCount = 0;
   readonly directory: string;
   readonly deviceId: string;
 
@@ -249,11 +262,11 @@ export class StorageService implements vscode.Disposable {
     await this.context.secrets.delete(this.secretKey(channelId));
   }
 
-  getSyncVault(): EncryptedVault | undefined {
+  getSyncVault(): EncryptedVaultV2 | undefined {
     return this.vault;
   }
 
-  async saveSyncVault(vault: EncryptedVault | undefined): Promise<void> {
+  async saveSyncVault(vault: EncryptedVaultV2 | undefined): Promise<void> {
     await this.enqueueStateWrite(async () => {
       await this.ensureInitialized();
       if (this.readOnlyReason) throw new Error(this.readOnlyReason);
@@ -263,50 +276,139 @@ export class StorageService implements vscode.Disposable {
         else await rm(path.join(this.directory, VAULT_FILE), { force: true });
         this.lastSerializedVault = JSON.stringify(vault);
       });
-      await this.context.globalState.update(SYNC_VAULT_KEY, vault);
     });
   }
 
-  getSyncedVault(): EncryptedVault | undefined {
-    return this.context.globalState.get<EncryptedVault>(SYNC_VAULT_KEY);
+  async updateSyncVaultBundle(
+    update: (current: SyncedVaultBundleV2 | undefined) => Promise<SyncedVaultBundleV2>,
+  ): Promise<SyncedVaultBundleV2> {
+    return this.enqueueStateWrite(async () => {
+      await this.ensureInitialized();
+      if (this.readOnlyReason) throw new Error(this.readOnlyReason);
+      let updated!: SyncedVaultBundleV2;
+      await this.withLock(async () => {
+        const diskVault = await this.readVaultFile(false);
+        const encodedKey = await this.readSharedVaultKey();
+        const current = diskVault?.vault && encodedKey
+          ? { version: 2 as const, generation: this.state.syncGeneration, key: encodedKey, vault: diskVault.vault }
+          : undefined;
+        updated = await update(current);
+        this.vault = updated.vault;
+        await this.writeVaultFile(updated.vault);
+        await this.atomicWrite(VAULT_KEY_FILE, `${updated.key}\n`);
+        this.lastSerializedVault = JSON.stringify(updated.vault);
+      });
+      await this.saveSyncLocalKey(updated.key);
+      return updated;
+    });
   }
 
-  async saveSyncedVault(vault: EncryptedVault | undefined): Promise<void> {
-    await this.context.globalState.update(SYNC_VAULT_KEY, vault);
+  async saveLocalVaultBundle(bundle: SyncedVaultBundleV2 | undefined): Promise<void> {
+    await this.enqueueStateWrite(async () => {
+      await this.ensureInitialized();
+      if (this.readOnlyReason) throw new Error(this.readOnlyReason);
+      await this.withLock(async () => {
+        this.vault = bundle?.vault;
+        if (bundle) {
+          await this.writeVaultFile(bundle.vault);
+          await this.atomicWrite(VAULT_KEY_FILE, `${bundle.key}\n`);
+        } else {
+          await rm(path.join(this.directory, VAULT_FILE), { force: true });
+          await rm(path.join(this.directory, VAULT_KEY_FILE), { force: true });
+        }
+        this.lastSerializedVault = JSON.stringify(bundle?.vault);
+      });
+      if (bundle) await this.saveSyncLocalKey(bundle.key);
+      else await this.deleteSyncLocalKey();
+    });
   }
 
-  getSyncManifest(): SyncManifestV3 | undefined {
-    return this.context.globalState.get<SyncManifestV3>(SYNC_MANIFEST_KEY);
+  getSyncedVaultBundle(): SyncedVaultBundleV2 | undefined {
+    return this.context.globalState.get<SyncedVaultBundleV2>(SYNC_VAULT_BUNDLE_KEY);
   }
 
-  async saveSyncManifest(manifest: SyncManifestV3 | undefined): Promise<void> {
-    await this.context.globalState.update(SYNC_MANIFEST_KEY, manifest);
+  async saveSyncedVaultBundle(bundle: SyncedVaultBundleV2 | undefined): Promise<void> {
+    await this.context.globalState.update(SYNC_VAULT_BUNDLE_KEY, bundle);
   }
 
-  getSyncChunk(index: number): string | undefined {
-    return this.context.globalState.get<string>(`${SYNC_CHUNK_PREFIX}${index}`);
+  getSyncManifest(): SyncManifestV4 | undefined {
+    return this.context.globalState.get<SyncManifestV4>(SYNC_MANIFEST_KEY);
   }
 
-  async saveSyncChunks(chunks: readonly string[]): Promise<void> {
-    const previousCount = Math.max(this.syncedChunkCount, this.getSyncManifest()?.chunkCount ?? 0);
+  getSyncChunk(snapshotId: string, index: number): string | undefined {
+    return this.context.globalState.get<string>(this.syncChunkKey(snapshotId, index));
+  }
+
+  async saveSyncSnapshot(manifest: SyncManifestV4, chunks: readonly string[]): Promise<void> {
+    const previous = this.getLocalSnapshots();
+    const current = { snapshotId: manifest.snapshotId, chunkCount: chunks.length };
+    const retained = [current, ...previous.filter((item) => item.snapshotId !== current.snapshotId)].slice(0, 2);
+    this.registerSyncKeys(manifest, [...previous, current]);
     for (let index = 0; index < chunks.length; index += 1) {
-      await this.context.globalState.update(`${SYNC_CHUNK_PREFIX}${index}`, chunks[index]);
+      await this.context.globalState.update(this.syncChunkKey(manifest.snapshotId, index), chunks[index]);
     }
-    for (let index = chunks.length; index < previousCount; index += 1) {
-      await this.context.globalState.update(`${SYNC_CHUNK_PREFIX}${index}`, undefined);
+    await this.context.globalState.update(SYNC_MANIFEST_KEY, manifest);
+    await this.context.globalState.update(PROFILE_SNAPSHOTS_KEY, retained);
+    for (const stale of previous.filter((item) => !retained.some((kept) => kept.snapshotId === item.snapshotId))) {
+      for (let index = 0; index < stale.chunkCount; index += 1) {
+        await this.context.globalState.update(this.syncChunkKey(stale.snapshotId, index), undefined);
+      }
     }
-    this.syncedChunkCount = chunks.length;
-    this.registerSyncKeys(chunks.length);
+    this.registerSyncKeys(manifest, retained);
   }
 
-  registerSyncKeys(chunkCount = this.getSyncManifest()?.chunkCount ?? 0): void {
-    this.syncedChunkCount = chunkCount;
+  registerSyncKeys(manifest = this.getSyncManifest(), snapshots = this.getLocalSnapshots()): void {
+    const manifestReference = manifest
+      && typeof manifest.snapshotId === 'string'
+      && /^[a-zA-Z0-9-]{1,80}$/.test(manifest.snapshotId)
+      && Number.isInteger(manifest.chunkCount)
+      && manifest.chunkCount >= 0
+      && manifest.chunkCount <= MAX_SYNC_CHUNKS
+      ? [{ snapshotId: manifest.snapshotId, chunkCount: manifest.chunkCount }]
+      : [];
+    const references = [...manifestReference, ...snapshots];
+    const unique = references.filter((item, index) => references.findIndex((candidate) => candidate.snapshotId === item.snapshotId) === index);
     this.context.globalState.setKeysForSync([
       SYNC_MANIFEST_KEY,
-      SYNC_VAULT_KEY,
-      SYNC_ENCRYPTION_KEY,
-      ...Array.from({ length: chunkCount }, (_, index) => `${SYNC_CHUNK_PREFIX}${index}`),
+      SYNC_VAULT_BUNDLE_KEY,
+      ...unique.flatMap((item) => Array.from({ length: item.chunkCount }, (_, index) => this.syncChunkKey(item.snapshotId, index))),
     ]);
+  }
+
+  async clearLegacySyncData(): Promise<void> {
+    const manifest = this.context.globalState.get<{ chunkCount?: unknown }>(LEGACY_MANIFEST_KEY);
+    const chunkCount = Number.isInteger(manifest?.chunkCount)
+      && Number(manifest?.chunkCount) >= 0
+      && Number(manifest?.chunkCount) <= MAX_SYNC_CHUNKS
+      ? Number(manifest?.chunkCount)
+      : 0;
+    const legacyKeys = [
+      LEGACY_MANIFEST_KEY,
+      LEGACY_VAULT_KEY,
+      LEGACY_ENCRYPTION_KEY,
+      ...Array.from({ length: chunkCount }, (_, index) => `${LEGACY_CHUNK_PREFIX}${index}`),
+    ];
+    const currentManifest = this.getSyncManifest();
+    const currentSnapshots = this.getLocalSnapshots();
+    const currentChunkKeys = currentManifest
+      && typeof currentManifest.snapshotId === 'string'
+      && /^[a-zA-Z0-9-]{1,80}$/.test(currentManifest.snapshotId)
+      && Number.isInteger(currentManifest.chunkCount)
+      && currentManifest.chunkCount >= 0
+      && currentManifest.chunkCount <= MAX_SYNC_CHUNKS
+      ? Array.from({ length: currentManifest.chunkCount }, (_, index) => this.syncChunkKey(currentManifest.snapshotId, index))
+      : [];
+    this.context.globalState.setKeysForSync([
+      ...legacyKeys,
+      SYNC_MANIFEST_KEY,
+      SYNC_VAULT_BUNDLE_KEY,
+      ...currentChunkKeys,
+    ]);
+    for (const key of legacyKeys) await this.context.globalState.update(key, undefined);
+    await this.context.secrets.delete(LEGACY_LOCAL_KEY);
+    await rm(path.join(this.directory, LEGACY_VAULT_FILE), { force: true });
+    await rm(path.join(this.directory, LEGACY_VAULT_KEY_FILE), { force: true });
+    this.registerSyncKeys(currentManifest, currentSnapshots);
   }
 
   // 已执行的重置代次属于单个 Profile：共享状态跨 Profile 与跨设备传播，
@@ -327,6 +429,14 @@ export class StorageService implements vscode.Disposable {
     await this.context.globalState.update(PROFILE_SYNC_ACKNOWLEDGED_KEY, acknowledged);
   }
 
+  getSyncV4Initialized(): boolean {
+    return this.context.globalState.get<boolean>(PROFILE_SYNC_V4_INITIALIZED_KEY, false);
+  }
+
+  async saveSyncV4Initialized(initialized: boolean): Promise<void> {
+    await this.context.globalState.update(PROFILE_SYNC_V4_INITIALIZED_KEY, initialized);
+  }
+
   async getSyncLocalKey(): Promise<string | undefined> {
     return this.context.secrets.get(SYNC_LOCAL_KEY);
   }
@@ -337,14 +447,6 @@ export class StorageService implements vscode.Disposable {
 
   async deleteSyncLocalKey(): Promise<void> {
     await this.context.secrets.delete(SYNC_LOCAL_KEY);
-  }
-
-  getSyncedEncryptionKey(): string | undefined {
-    return this.context.globalState.get<string>(SYNC_ENCRYPTION_KEY);
-  }
-
-  async saveSyncedEncryptionKey(key: string | undefined): Promise<void> {
-    await this.context.globalState.update(SYNC_ENCRYPTION_KEY, key);
   }
 
   async readSharedVaultKey(): Promise<string | undefined> {
@@ -494,9 +596,9 @@ export class StorageService implements vscode.Disposable {
 
   // 返回 undefined 表示读取失败，`{ vault: undefined }` 表示文件确实不存在。
   // 两者不可混同：把读取失败当作保险库已删除，会让同步误判为未启用并清除本机凭据。
-  private async readVaultFile(preserveCorrupt: boolean): Promise<{ vault: EncryptedVault | undefined } | undefined> {
+  private async readVaultFile(preserveCorrupt: boolean): Promise<{ vault: EncryptedVaultV2 | undefined } | undefined> {
     try {
-      const vault = JSON.parse(await readFile(path.join(this.directory, VAULT_FILE), 'utf8')) as EncryptedVault;
+      const vault = JSON.parse(await readFile(path.join(this.directory, VAULT_FILE), 'utf8')) as EncryptedVaultV2;
       this.vaultError = undefined;
       return { vault };
     } catch (error) {
@@ -514,7 +616,7 @@ export class StorageService implements vscode.Disposable {
     await this.atomicWrite(STATE_FILE, `${serializeSharedState(state, true)}\n`);
   }
 
-  private async writeVaultFile(vault: EncryptedVault): Promise<void> {
+  private async writeVaultFile(vault: EncryptedVaultV2): Promise<void> {
     await this.atomicWrite(VAULT_FILE, `${JSON.stringify(vault, null, 2)}\n`);
   }
 
@@ -609,6 +711,25 @@ export class StorageService implements vscode.Disposable {
 
   private secretKey(channelId: string): string {
     return `aiManager.channel.${channelId}.apiKey`;
+  }
+
+  private getLocalSnapshots(): SyncSnapshotRef[] {
+    const value = this.context.globalState.get<unknown>(PROFILE_SNAPSHOTS_KEY);
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((item) => {
+      if (!item || typeof item !== 'object') return [];
+      const candidate = item as Partial<SyncSnapshotRef>;
+      return typeof candidate.snapshotId === 'string'
+        && Number.isInteger(candidate.chunkCount)
+        && Number(candidate.chunkCount) >= 0
+        && Number(candidate.chunkCount) <= MAX_SYNC_CHUNKS
+        ? [{ snapshotId: candidate.snapshotId, chunkCount: Number(candidate.chunkCount) }]
+        : [];
+    });
+  }
+
+  private syncChunkKey(snapshotId: string, index: number): string {
+    return `${SYNC_CHUNK_PREFIX}${snapshotId}.${index}`;
   }
 
   private enqueueStateWrite<T>(operation: () => PromiseLike<T>): Promise<T> {
