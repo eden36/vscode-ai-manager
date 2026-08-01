@@ -237,6 +237,7 @@ function syncModelPickerOverlay(): void {
   modelPickerOverlay.style.top = `${rect.bottom + 1}px`;
   modelPickerOverlay.style.left = `${rect.left}px`;
   modelPickerOverlay.style.width = `${rect.width}px`;
+  modelPickerOptions?.style.setProperty('max-height', `${Math.max(0, window.innerHeight - rect.bottom - 24)}px`);
 }
 
 function handleModelPickerOutsidePointer(event: MouseEvent): void {

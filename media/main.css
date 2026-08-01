@@ -58,7 +58,7 @@ h2 { font-size: 14px; margin: 0 0 10px; }
 .model-combobox-toggle:hover { background: var(--vscode-list-hoverBackground); opacity: 1; }
 .model-combobox-toggle:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -2px; z-index: 1; }
 .model-picker-overlay { position: fixed; z-index: 10; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editorWidget-background, var(--vscode-input-background)); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); }
-.model-options { max-height: min(480px, calc(100vh - 96px)); overflow-y: auto; }
+.model-options { overflow-y: auto; }
 .model-options .muted { margin: 8px; }
 .model-option { display: flex; align-items: center; min-height: 34px; color: var(--vscode-list-foreground); background: transparent; }
 .model-option:hover { background: var(--vscode-list-hoverBackground); }
