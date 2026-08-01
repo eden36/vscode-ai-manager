@@ -93,23 +93,27 @@ export class StorageService implements vscode.Disposable {
   async initialize(): Promise<void> {
     if (this.initialized) return;
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    try {
-      await this.withLock(async () => {
-        const disk = await this.readStateFile(true);
-        if (disk) {
-          this.state = disk;
-        } else if (!this.readOnlyReason) {
-          this.state = createEmptySharedState();
-          await this.writeStateFile(this.state);
-        }
-        const diskVault = await this.readVaultFile(true);
-        this.vault = diskVault?.vault;
-        if (this.vault && !diskVault?.vault && !this.readOnlyReason) await this.writeVaultFile(this.vault);
-      });
-    } catch (error) {
-      // 其他窗口正在写入或磁盘暂时不可用时不能阻断扩展激活：保留空内存态并记录原因，
-      // 后续写入会重新读盘合并，文件监听也会在共享文件变化时补齐状态。
-      this.stateError = error instanceof Error ? error.message : '共享状态初始化失败';
+    const disk = await this.readStateFile(false);
+    const diskVault = await this.readVaultFile(false);
+    if (disk) this.state = disk;
+    if (diskVault) this.vault = diskVault.vault;
+    if ((!disk || !diskVault) && !this.readOnlyReason) {
+      try {
+        await this.withLock(async () => {
+          const lockedDisk = await this.readStateFile(true);
+          if (lockedDisk) {
+            this.state = lockedDisk;
+          } else if (!this.readOnlyReason) {
+            this.state = createEmptySharedState();
+            await this.writeStateFile(this.state);
+          }
+          const lockedVault = await this.readVaultFile(true);
+          this.vault = lockedVault?.vault;
+        });
+      } catch (error) {
+        // 首次创建或修复文件时若其他窗口正在写入，不能阻断扩展激活。
+        this.stateError = error instanceof Error ? error.message : '共享状态初始化失败';
+      }
     }
     this.lastSerializedState = serializeSharedState(this.state);
     this.lastSerializedVault = JSON.stringify(this.vault);

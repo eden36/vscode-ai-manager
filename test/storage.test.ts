@@ -139,23 +139,19 @@ describe('StorageService', () => {
     other.dispose();
   });
 
-  it('初始化时共享文件被占用不抛出，后续写入自行恢复', async () => {
+  it('初始化读取已有共享文件时不受其他窗口写锁影响', async () => {
     storage.dispose();
     await storage.saveChannels([channel()]);
-    // 模拟另一个窗口长时间持有文件锁：初始化必须降级，否则扩展无法激活。
     await writeFile(path.join(storageDirectory, 'state.lock'), String(Date.now()), 'utf8');
     const blocked = isolatedStorage(storageDirectory, 'blocked');
 
     await expect(blocked.initialize()).resolves.toBeUndefined();
-    expect(blocked.getLastError()).toContain('其他 VS Code 窗口');
-    expect(blocked.getChannels()).toEqual([]);
+    expect(blocked.getLastError()).toBeUndefined();
+    expect(blocked.getChannels()).toHaveLength(1);
 
     await rm(path.join(storageDirectory, 'state.lock'), { force: true });
-    await blocked.updateChannels((channels) => channels);
-
-    expect(blocked.getChannels()).toHaveLength(1);
     blocked.dispose();
-  }, 10_000);
+  });
 
   it('保险库读取失败时保留已加载的保险库，不误判为已删除', async () => {
     const vaultPath = path.join(storageDirectory, 'vault-v1.json');
