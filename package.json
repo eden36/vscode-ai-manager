@@ -111,6 +111,9 @@
     "check:unit": "npm run typecheck && npm run lint && npm test && npm run build",
     "check": "npm run check:unit && npm run test:integration",
     "package:vsix": "npm run check && vsce package --no-dependencies",
+    "publish:patch": "npm run check && vsce publish patch --no-dependencies",
+    "publish:minor": "npm run check && vsce publish minor --no-dependencies",
+    "publish:major": "npm run check && vsce publish major --no-dependencies",
     "dev:vscode": "npm run build && node scripts/open-vscode-dev-host.mjs"
   },
   "devDependencies": {
