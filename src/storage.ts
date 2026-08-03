@@ -46,8 +46,17 @@ const STATE_FILE = 'state-v3.json';
 const VAULT_FILE = 'vault-v2.json';
 const LOCK_FILE = 'state.lock';
 const LOCK_STALE_MS = 30_000;
-const LOCK_WAIT_MS = 3_000;
+const LOCK_WAIT_MS = 8_000;
 const MAX_SYNC_CHUNKS = 256;
+
+// 多个窗口同时启动时锁冲突属于可恢复的临时状态，调用方据此重试，不必当作故障提示用户。
+export class SharedStateLockBusyError extends Error {
+  override readonly name = 'SharedStateLockBusyError';
+
+  constructor(cause?: unknown) {
+    super('共享状态正被其他 VS Code 窗口占用，请稍后重试', { cause });
+  }
+}
 
 export interface StorageServiceOptions {
   directory?: string;
@@ -294,9 +303,12 @@ export class StorageService implements vscode.Disposable {
           : undefined;
         updated = await update(current);
         this.vault = updated.vault;
-        await this.writeVaultFile(updated.vault);
-        await this.atomicWrite(VAULT_KEY_FILE, `${updated.key}\n`);
-        this.lastSerializedVault = JSON.stringify(updated.vault);
+        // 每个窗口启动和每次定时同步都会走到这里，内容未变化时重写文件只会持续争抢文件锁，
+        // 并让其他窗口反复触发文件监听。
+        const serialized = JSON.stringify(updated.vault);
+        if (!diskVault || JSON.stringify(diskVault.vault) !== serialized) await this.writeVaultFile(updated.vault);
+        if (encodedKey !== updated.key) await this.atomicWrite(VAULT_KEY_FILE, `${updated.key}\n`);
+        this.lastSerializedVault = serialized;
       });
       await this.saveSyncLocalKey(updated.key);
       return updated;
@@ -649,22 +661,39 @@ export class StorageService implements vscode.Disposable {
         handle = await open(lockPath, 'wx', 0o600);
       } catch (error) {
         if (!isFileExists(error)) throw error;
-        const info = await stat(lockPath).catch(() => undefined);
-        if (info && Date.now() - info.mtimeMs > LOCK_STALE_MS) {
+        if (await this.isLockAbandoned(lockPath)) {
           await rm(lockPath, { force: true });
           continue;
         }
-        if (Date.now() - started >= LOCK_WAIT_MS) throw new Error('共享状态正被其他 VS Code 窗口占用，请稍后重试', { cause: error });
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        if (Date.now() - started >= LOCK_WAIT_MS) throw new SharedStateLockBusyError(error);
+        // 退避时间加随机抖动，避免多个窗口在同一时刻反复争抢同一把锁。
+        await new Promise((resolve) => setTimeout(resolve, 30 + Math.random() * 50));
         continue;
       }
       try {
-        await handle.writeFile(String(Date.now()), 'utf8');
+        await handle.writeFile(`${Date.now()} ${process.pid}`, 'utf8');
         return await operation();
       } finally {
         await handle.close();
         await rm(lockPath, { force: true });
       }
+    }
+  }
+
+  // 窗口崩溃或被强制关闭会残留锁文件。只按 mtime 判断要等满 LOCK_STALE_MS，
+  // 这段时间内新窗口的写入全部失败，因此锁文件同时记录持有者进程号，用于立即识别已退出的持有者。
+  private async isLockAbandoned(lockPath: string): Promise<boolean> {
+    const info = await stat(lockPath).catch(() => undefined);
+    if (!info) return false;
+    if (Date.now() - info.mtimeMs > LOCK_STALE_MS) return true;
+    const owner = Number((await readFile(lockPath, 'utf8').catch(() => '')).trim().split(' ')[1]);
+    if (!Number.isInteger(owner) || owner <= 0) return false;
+    try {
+      process.kill(owner, 0);
+      return false;
+    } catch (error) {
+      // EPERM 表示进程存在但无权访问，只有 ESRCH 才能确认持有者已退出。
+      return isNodeError(error) && error.code === 'ESRCH';
     }
   }
 

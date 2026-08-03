@@ -1,12 +1,25 @@
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('vscode', () => ({}));
 
-import { resolveSharedStorageDirectory, StorageService } from '../src/storage';
+import { resolveSharedStorageDirectory, SharedStateLockBusyError, StorageService } from '../src/storage';
 import { channel, model } from './fixtures';
+
+// 取一个当前确实不存在的进程号，用于模拟持有锁的窗口已崩溃退出。
+function exitedProcessId(): number {
+  for (let pid = 60_000; pid < 60_200; pid += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return pid;
+    }
+  }
+  throw new Error('未找到已退出的进程号');
+}
 
 function chatBinding(setting: string): any {
   return { setting, providerId: `provider-${setting}`, appliedValue: `value-${setting}`, previousHadGlobalValue: false };
@@ -151,6 +164,38 @@ describe('StorageService', () => {
 
     await rm(path.join(storageDirectory, 'state.lock'), { force: true });
     blocked.dispose();
+  });
+
+  it('锁文件的持有进程已退出时立即接管，不等待锁过期', async () => {
+    const lockPath = path.join(storageDirectory, 'state.lock');
+    await writeFile(lockPath, `${Date.now()} ${exitedProcessId()}`, 'utf8');
+
+    await storage.saveChannels([channel()]);
+
+    expect(storage.getChannels()).toHaveLength(1);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('锁文件的持有进程仍在运行时报告占用', async () => {
+    const lockPath = path.join(storageDirectory, 'state.lock');
+    await writeFile(lockPath, `${Date.now()} ${process.pid}`, 'utf8');
+
+    await expect(storage.saveChannels([channel()])).rejects.toThrow(SharedStateLockBusyError);
+
+    await rm(lockPath, { force: true });
+  }, 15_000);
+
+  it('保险库内容未变化时不重写共享文件', async () => {
+    const vaultPath = path.join(storageDirectory, 'vault-v2.json');
+    const bundle = { version: 2, generation: 0, key: 'a'.repeat(44), vault: { version: 2, updatedAt: 3 } } as any;
+    await storage.updateSyncVaultBundle(async () => bundle);
+    const written = await stat(vaultPath);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const result = await storage.updateSyncVaultBundle(async (current) => current ?? bundle);
+
+    expect(result.vault).toMatchObject({ updatedAt: 3 });
+    expect((await stat(vaultPath)).mtimeMs).toBe(written.mtimeMs);
   });
 
   it('保险库读取失败时保留已加载的保险库，不误判为已删除', async () => {

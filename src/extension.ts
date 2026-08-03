@@ -4,7 +4,7 @@ import { notifyCatalogChanges } from './catalog-notifications';
 import { CatalogService } from './catalog';
 import { ChatBindingService, type ChatSettingSelections } from './chat-settings';
 import { AiManagerLanguageProvider } from './language-provider';
-import { StorageService } from './storage';
+import { SharedStateLockBusyError, StorageService } from './storage';
 import { startSyncPolling, SyncService } from './sync';
 import { DashboardWebviewProvider } from './webview-provider';
 
@@ -14,11 +14,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // 任一启动步骤失败都不能阻断激活，否则用户连管理界面都打不开，看不到升级或重试提示。
   const startupFailures: string[] = [];
   const runStartupStep = async (label: string, step: () => Promise<void>): Promise<void> => {
-    try {
-      await step();
-    } catch (error) {
-      startupFailures.push(error instanceof Error ? error.message : `${label}失败`);
-      output.appendLine(`[${new Date().toISOString()}] ${label}失败 类别=${error instanceof Error ? error.name : 'unknown'}`);
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await step();
+        return;
+      } catch (error) {
+        // 多个窗口同时启动会短暂争抢共享文件锁，重试即可完成；只有一直拿不到锁才提示用户。
+        if (error instanceof SharedStateLockBusyError && attempt < 2) {
+          output.appendLine(`[${new Date().toISOString()}] ${label}等待共享状态锁，准备第 ${attempt + 2} 次尝试`);
+          await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+          continue;
+        }
+        startupFailures.push(error instanceof Error ? error.message : `${label}失败`);
+        output.appendLine(`[${new Date().toISOString()}] ${label}失败 类别=${error instanceof Error ? error.name : 'unknown'}`);
+        return;
+      }
     }
   };
 
