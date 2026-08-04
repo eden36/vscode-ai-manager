@@ -33,15 +33,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   const storage = new StorageService(context);
-  await runStartupStep('共享状态初始化', () => storage.initialize());
   const sync = new SyncService(storage);
-  await runStartupStep('同步初始化', () => sync.initialize());
   const catalog = new CatalogService(storage, sync);
   const chatBindings = new ChatBindingService(storage);
   const app = new AppService(storage, catalog, chatBindings, sync);
   const dashboard = new DashboardWebviewProvider(context.extensionUri, app, chatBindings, storage);
   const languageProvider = new AiManagerLanguageProvider(app, output);
 
+  // 视图和命令必须先于共享状态初始化注册：切换 Profile 或多窗口并存时，初始化要等其他窗口
+  // 释放文件锁，可能持续数十秒；此前若视图还没有提供程序，面板就是一片空白，用户也拿不到日志入口。
   context.subscriptions.push(
     output,
     storage,
@@ -49,7 +49,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     dashboard,
     languageProvider,
     chatBindings,
-    vscode.lm.registerLanguageModelChatProvider('ai-manager', languageProvider),
     vscode.window.registerWebviewViewProvider('aiManager.dashboard', dashboard),
     vscode.commands.registerCommand('aiManager.open', () => vscode.commands.executeCommand('workbench.view.extension.aiManager')),
     vscode.commands.registerCommand('aiManager.showLogs', () => output.show()),
@@ -78,8 +77,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  await runStartupStep('Chat 设置初始化', () => chatBindings.initialize());
-  await runStartupStep('同步状态发布', () => sync.saveProfileFromLocal());
+  // 模型提供程序注册失败不能连带影响管理面板，否则用户既改不了配置也看不到原因。
+  try {
+    context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider('ai-manager', languageProvider));
+  } catch (error) {
+    startupFailures.push(error instanceof Error ? error.message : '模型提供程序注册失败');
+    output.appendLine(`[${new Date().toISOString()}] 模型提供程序注册失败 类别=${error instanceof Error ? error.name : 'unknown'}`);
+  }
 
   context.subscriptions.push(storage.onDidChange((change) => {
     void (async () => {
@@ -97,17 +101,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       output.appendLine(`[${new Date().toISOString()}] 共享状态应用失败 类别=${error instanceof Error ? error.name : 'unknown'}`);
     });
   }));
-
-  if (startupFailures.length > 0) {
-    void vscode.window.showWarningMessage(`AI Manager 启动未完成：${startupFailures[0]}。部分功能可能不可用，请打开 AI Manager 面板查看状态。`);
-  }
-
-  void app.refreshAll(false, true).then(async (summary) => {
-    await notifyCatalogChanges(summary.changes);
-    for (const failure of summary.failures) output.appendLine(`[${new Date().toISOString()}] 启动刷新失败 渠道=${failure.channelName} 类别=${failure.message}`);
-  }).catch((error: unknown) => {
-    output.appendLine(`[${new Date().toISOString()}] 启动刷新失败 类别=${error instanceof Error ? error.name : 'unknown'}`);
-  });
 
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
   const runScheduledRefresh = (): void => {
@@ -141,6 +134,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
     (error) => output.appendLine(`[${new Date().toISOString()}] 定时同步失败 类别=${error instanceof Error ? error.name : 'unknown'}`),
   ));
+
+  // 初始化在后台进行：activate 不等待共享状态和同步，面板可以立即显示，数据就绪后再刷新一次。
+  void (async () => {
+    await runStartupStep('共享状态初始化', () => storage.initialize());
+    await runStartupStep('同步初始化', () => sync.initialize());
+    await runStartupStep('Chat 设置初始化', () => chatBindings.initialize());
+    await runStartupStep('同步状态发布', () => sync.saveProfileFromLocal());
+    if (startupFailures.length > 0) {
+      void vscode.window.showWarningMessage(`AI Manager 启动未完成：${startupFailures[0]}。部分功能可能不可用，请打开 AI Manager 面板查看状态。`);
+    }
+    app.notifyExternalChange();
+    const summary = await app.refreshAll(false, true);
+    await notifyCatalogChanges(summary.changes);
+    for (const failure of summary.failures) output.appendLine(`[${new Date().toISOString()}] 启动刷新失败 渠道=${failure.channelName} 类别=${failure.message}`);
+  })().catch((error: unknown) => {
+    output.appendLine(`[${new Date().toISOString()}] 启动初始化失败 类别=${error instanceof Error ? error.name : 'unknown'}`);
+  });
 }
 
 export function deactivate(): void {}
