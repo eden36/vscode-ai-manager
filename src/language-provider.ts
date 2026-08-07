@@ -2,14 +2,27 @@ import * as vscode from 'vscode';
 import { OpenAIClient } from './openai-client';
 import { AnthropicClient } from './anthropic-client';
 import { GeminiClient } from './gemini-client';
-import { estimateTokens, getExposedModels, getModelDisplayName, isModelUsable, modelReportsToolCalling } from './models';
-import { safeErrorMessage, shouldNotifyLanguageModelFailure } from './errors';
+import { ResponsesClient } from './responses-client';
+import { estimateTokens, getExposedModels, getModelDisplayName, getProtocolPath, isModelUsable, modelReportsToolCalling } from './models';
+import { RequestError, safeErrorMessage, shouldNotifyLanguageModelFailure } from './errors';
 import type { AppService } from './app-service';
+import type { StreamResult } from './openai-client';
+import type { ResolvedCandidate } from './types';
+
+type ClientProtocol = 'openai' | 'anthropic' | 'gemini' | 'responses';
+
+const PROTOCOL_FALLBACK_ORDER: readonly ClientProtocol[] = ['openai', 'responses', 'anthropic', 'gemini'];
+
+function isProtocolMismatch(error: unknown): boolean {
+  return error instanceof RequestError
+    && !error.responseStarted
+    && (error.status === 404 || error.status === 503);
+}
 
 export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvider, vscode.Disposable {
   private readonly modelChangeEmitter = new vscode.EventEmitter<void>();
   readonly onDidChangeLanguageModelChatInformation = this.modelChangeEmitter.event;
-  private readonly clients = { openai: new OpenAIClient(), anthropic: new AnthropicClient(), gemini: new GeminiClient() };
+  private readonly clients = { openai: new OpenAIClient(), anthropic: new AnthropicClient(), gemini: new GeminiClient(), responses: new ResponsesClient() };
   private readonly changeSubscription: vscode.Disposable;
 
   constructor(
@@ -66,7 +79,7 @@ export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvid
       const apiKey = await this.app.storage.getApiKey(channel.id);
       if (!apiKey?.trim()) throw new Error(`${channel.name} 未配置 API Key，请在 AI Manager 中编辑渠道并保存密钥`);
       if (model.protocol === 'unknown') throw new Error('模型协议不受支持');
-      const result = await this.clients[model.protocol].streamChat({ channel, model }, apiKey, messages, options, progress, token);
+      const result = await this.streamWithProtocolFallback({ channel, model }, apiKey, messages, options, progress, token);
       if (!result.streamed) {
         const message = `${getModelDisplayName(model, channel)} 未返回有效内容，请检查模型或渠道配置`;
         this.log(getModelDisplayName(model, channel), channel.name, model.id, Date.now() - startedAt, 'empty-response', undefined, message);
@@ -80,6 +93,40 @@ export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvid
       const status = error instanceof Error && 'status' in error && typeof error.status === 'number' ? error.status : undefined;
       this.log(getModelDisplayName(model, channel), channel.name, model.id, Date.now() - startedAt, category, status, message);
       if (shouldNotifyLanguageModelFailure(options, error)) void vscode.window.showErrorMessage(message);
+      throw error;
+    }
+  }
+
+  /**
+   * 渠道对「模型存在但该协议端点没有上游」通常回 404/503，此时换一个已配置的协议重试一次，
+   * 成功后把探测结果写回目录，避免每次调用都先失败一轮。
+   */
+  private async streamWithProtocolFallback(
+    target: ResolvedCandidate,
+    apiKey: string,
+    messages: readonly vscode.LanguageModelChatRequestMessage[],
+    options: vscode.ProvideLanguageModelChatResponseOptions,
+    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+    token: vscode.CancellationToken,
+  ): Promise<StreamResult> {
+    const { channel, model } = target;
+    try {
+      return await this.clients[model.protocol as ClientProtocol].streamChat(target, apiKey, messages, options, progress, token);
+    } catch (error) {
+      if (!isProtocolMismatch(error) || model.metadataOverridden) throw error;
+      for (const candidate of PROTOCOL_FALLBACK_ORDER) {
+        if (candidate === model.protocol || !getProtocolPath(channel, candidate)) continue;
+        try {
+          const result = await this.clients[candidate].streamChat(
+            { channel, model: { ...model, protocol: candidate } }, apiKey, messages, options, progress, token,
+          );
+          this.output.appendLine(`[${new Date().toISOString()}] 渠道=${channel.name} 模型=${model.id} 协议自动切换为 ${candidate}`);
+          void this.app.applyDetectedProtocol(channel.id, model.id, candidate);
+          return result;
+        } catch (retryError) {
+          if (!isProtocolMismatch(retryError)) throw retryError;
+        }
+      }
       throw error;
     }
   }

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CatalogService, catalogMetadataBaseline, inferProtocol, joinEndpoint, parseModelCatalog } from '../src/catalog';
 import { createModelProviderId } from '../src/models';
 import { createChannelDefaults } from '../src/presets';
-import type { ChannelPreset } from '../src/types';
+import type { ChannelPreset, ModelProtocol } from '../src/types';
 import { channel, model } from './fixtures';
 
 describe('parseModelCatalog', () => {
@@ -28,6 +28,17 @@ describe('parseModelCatalog', () => {
     expect(parseModelCatalog({ data: [{ id: 'minimax-m3' }, { id: 'qwen3.7-plus' }, { id: 'kimi-k3' }] }, go).map((item) => item.protocol))
       .toEqual(['anthropic', 'anthropic', 'openai']);
     expect(parseModelCatalog({ data: [{ id: 'minimax-m3' }] }, consoleChannel)[0]?.protocol).toBe('openai');
+  });
+
+  it('外部协议元数据优先于模型 ID 推断，缺失时回落本地规则', () => {
+    const go = channel({ preset: 'opencode-go' });
+    const overrides = new Map<string, ModelProtocol>([['grok-4.5', 'responses'], ['minimax-m3', 'anthropic']]);
+    expect(parseModelCatalog({ data: [{ id: 'grok-4.5' }, { id: 'minimax-m3' }, { id: 'qwen3.7-plus' }] }, go, Date.now(), overrides).map((item) => item.protocol))
+      .toEqual(['responses', 'anthropic', 'anthropic']);
+  });
+
+  it('显式协议字段优先于外部协议元数据', () => {
+    expect(inferProtocol({ id: 'grok-4.5', endpoint: '/v1/messages' }, undefined, new Map([['grok-4.5', 'responses']]))).toBe('anthropic');
   });
 
   it('显式协议优先于模型 ID 推断', () => {

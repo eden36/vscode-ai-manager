@@ -6,6 +6,7 @@ import { createModelProviderId, getProtocolPath } from './models';
 import { StorageService } from './storage';
 import type { SyncService } from './sync';
 import { apiKeyHeaders } from './protocol-http';
+import { fetchModelProtocols } from './model-metadata';
 
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
@@ -18,7 +19,11 @@ function positiveNumber(...values: unknown[]): number | undefined {
   return undefined;
 }
 
-export function inferProtocol(raw: Record<string, unknown>, channel?: ChannelConfig): ModelProtocol {
+export function inferProtocol(
+  raw: Record<string, unknown>,
+  channel?: ChannelConfig,
+  protocolOverrides?: ReadonlyMap<string, ModelProtocol>,
+): ModelProtocol {
   const explicit = [raw.apiType, raw.api_type, raw.protocol, raw.endpoint, raw.api]
     .filter((value): value is string => typeof value === 'string')
     .join(' ')
@@ -26,19 +31,27 @@ export function inferProtocol(raw: Record<string, unknown>, channel?: ChannelCon
   if (explicit.includes('anthropic') || explicit.includes('/messages')) return 'anthropic';
   if (explicit.includes('gemini') || explicit.includes('generatecontent')) return 'gemini';
   if (explicit.includes('openai') || explicit.includes('chat-completions') || explicit.includes('chat/completions')) return 'openai';
-  const modelId = typeof raw.id === 'string' ? raw.id.toLowerCase() : '';
+  const rawId = typeof raw.id === 'string' ? raw.id : '';
+  const override = protocolOverrides?.get(rawId);
+  if (override) return override;
+  const modelId = rawId.toLowerCase();
   if (channel?.preset === 'opencode-go' && (/^minimax-/.test(modelId) || /^qwen3\.[5-9]/.test(modelId))) return 'anthropic';
   return channel?.defaultProtocol ?? 'openai';
 }
 
-export function parseModelCatalog(payload: unknown, channel: ChannelConfig, now = Date.now()): CatalogModel[] {
+export function parseModelCatalog(
+  payload: unknown,
+  channel: ChannelConfig,
+  now = Date.now(),
+  protocolOverrides?: ReadonlyMap<string, ModelProtocol>,
+): CatalogModel[] {
   const root = objectValue(payload);
   const items = Array.isArray(payload) ? payload : Array.isArray(root.data) ? root.data : Array.isArray(root.models) ? root.models : [];
   const seen = new Set<string>();
   return items.flatMap((entry, catalogOrder) => {
     const raw = objectValue(entry);
     const rawId = typeof raw.id === 'string' ? raw.id.trim() : typeof raw.name === 'string' ? raw.name.trim() : '';
-    const protocol = inferProtocol(raw, channel);
+    const protocol = inferProtocol(raw, channel, protocolOverrides);
     const id = protocol === 'gemini' ? rawId.replace(/^models\//, '') : rawId;
     if (!id || seen.has(id)) return [];
     seen.add(id);
@@ -125,7 +138,8 @@ export class CatalogService {
       const apiKey = await this.storage.getApiKey(channel.id);
       const payload = await this.fetchJsonWithRetry(joinEndpoint(channel.baseUrl, channel.modelsPath), apiKey, channel);
       if (!this.hasRecognizedCatalogShape(payload)) throw new Error('模型目录格式不受支持');
-      const discovered = parseModelCatalog(payload, channel);
+      const protocolOverrides = await fetchModelProtocols(channel, channel.timeoutMs);
+      const discovered = parseModelCatalog(payload, channel, Date.now(), protocolOverrides);
       let merged: CatalogModel[] = [];
       let change: CatalogChange | undefined;
       await this.storage.updateModels((allModels) => {

@@ -21,6 +21,7 @@ interface SaveChannelPayload {
   chatPath?: string;
   anthropicPath?: string;
   geminiPath?: string;
+  responsesPath?: string;
   defaultProtocol?: string;
   authMode?: string;
   apiKey?: string;
@@ -269,7 +270,7 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
       <p id="sync-banner" class="sync-banner status" role="status" aria-live="polite" hidden></p>
       <div class="heading-row"><h1 id="channels-heading">渠道</h1><button id="new-channel" type="button">新增</button></div>
       <div id="channel-list"></div>
-      <dialog id="channel-dialog" class="channel-dialog" aria-labelledby="channel-form-title">
+      <dialog id="channel-dialog" class="app-dialog" aria-labelledby="channel-form-title">
         <form id="channel-form" class="form-card">
           <div class="dialog-header"><h2 id="channel-form-title">新增渠道</h2><button id="cancel-channel" type="button" aria-label="关闭">关闭</button></div>
           <input id="channel-id" type="hidden">
@@ -280,7 +281,8 @@ export class DashboardWebviewProvider implements vscode.WebviewViewProvider, vsc
           <label>OpenAI Chat 路径<input id="channel-chat-path" required></label>
           <label>Anthropic Messages 路径<input id="channel-anthropic-path" placeholder="留空表示不支持"></label>
           <label>Gemini 流式路径<input id="channel-gemini-path" placeholder="必须包含 {model}；留空表示不支持"></label>
-          <div class="grid"><label>默认调用协议<select id="channel-default-protocol"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option></select></label><label>API Key 认证方式<select id="channel-auth-mode"><option value="bearer">Authorization: Bearer</option><option value="anthropic-api-key">x-api-key</option><option value="google-api-key">x-goog-api-key</option></select></label></div>
+          <label>OpenAI Responses 路径<input id="channel-responses-path" placeholder="留空表示不支持"></label>
+          <div class="grid"><label>默认调用协议<select id="channel-default-protocol"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option><option value="responses">OpenAI Responses</option></select></label><label>API Key 认证方式<select id="channel-auth-mode"><option value="bearer">Authorization: Bearer</option><option value="anthropic-api-key">x-api-key</option><option value="google-api-key">x-goog-api-key</option></select></label></div>
           <label>API Key<input id="channel-api-key" type="password" autocomplete="off" placeholder="留空表示不修改"></label>
           <label id="channel-clear-api-key-label" class="checkbox" hidden><input id="channel-clear-api-key" type="checkbox">清除已保存的 API Key</label>
           <div class="grid"><label>超时（毫秒）<input id="channel-timeout" type="number" min="1000" max="120000"></label><label>刷新周期（分钟）<input id="channel-refresh" type="number" min="5" max="10080"></label></div>

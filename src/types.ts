@@ -12,7 +12,7 @@ export type ChannelPreset =
   | 'groq'
   | 'together'
   | 'xai';
-export type ModelProtocol = 'openai' | 'anthropic' | 'gemini' | 'unknown';
+export type ModelProtocol = 'openai' | 'anthropic' | 'gemini' | 'responses' | 'unknown';
 export type ChannelAuthMode = 'bearer' | 'anthropic-api-key' | 'google-api-key';
 export type ChatSettingKey =
   | 'chat.defaultModel'
@@ -31,6 +31,7 @@ export interface ChannelConfig {
   chatPath: string;
   anthropicPath?: string;
   geminiPath?: string;
+  responsesPath?: string;
   defaultProtocol: Exclude<ModelProtocol, 'unknown'>;
   authMode: ChannelAuthMode;
   enabled: boolean;

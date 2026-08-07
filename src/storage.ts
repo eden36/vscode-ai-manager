@@ -806,6 +806,7 @@ function channelCore(channel: ChannelConfig): Omit<ChannelConfig, 'lastRefreshAt
     chatPath: channel.chatPath,
     anthropicPath: channel.anthropicPath,
     geminiPath: channel.geminiPath,
+    responsesPath: channel.responsesPath,
     defaultProtocol: channel.defaultProtocol,
     authMode: channel.authMode,
     enabled: channel.enabled,

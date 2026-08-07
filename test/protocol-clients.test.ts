@@ -22,6 +22,7 @@ import * as vscode from 'vscode';
 import { apiKeyHeaders, isOpenCodeHostname, usesAnthropicApiKeyAuth, usesGoogleApiKeyAuth } from '../src/protocol-http';
 import { AnthropicClient, convertAnthropicMessages } from '../src/anthropic-client';
 import { convertGeminiMessages, GeminiClient } from '../src/gemini-client';
+import { convertResponsesMessages, ResponsesClient } from '../src/responses-client';
 import { channel, model } from './fixtures';
 
 const token = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => undefined }) };
@@ -101,6 +102,45 @@ describe('AnthropicClient', () => {
     expect(result.system).toBe('你是提交信息助手');
     expect(result.messages).toEqual([
       { role: 'user', content: [{ type: 'text', text: '生成提交说明' }] },
+    ]);
+  });
+});
+
+describe('ResponsesClient', () => {
+  it('调用 Responses 端点并解析文本与流式工具调用', async () => {
+    const target = { channel: channel({ preset: 'opencode-go', responsesPath: '/zen/go/v1/responses' }), model: model({ id: 'grok-4.5', protocol: 'responses' }) };
+    const fetchMock = vi.fn().mockResolvedValue(eventResponse([
+      { event: 'response.output_text.delta', data: { type: 'response.output_text.delta', delta: '你好' } },
+      { event: 'response.output_item.added', data: { type: 'response.output_item.added', output_index: 1, item: { type: 'function_call', id: 'item-1', call_id: 'call-1', name: 'read_file' } } },
+      { event: 'response.function_call_arguments.delta', data: { type: 'response.function_call_arguments.delta', item_id: 'item-1', delta: '{"path":"README.md"}' } },
+    ]));
+    vi.stubGlobal('fetch', fetchMock);
+    const parts: unknown[] = [];
+    await new ResponsesClient().streamChat(target, 'secret', [{ role: 1, name: undefined, content: [new vscode.LanguageModelTextPart('hi')] } as any], { tools: [{ name: 'read_file', description: '读取', inputSchema: {} }] } as any, { report: (part) => parts.push(part) }, token as any);
+    expect(parts).toEqual([
+      expect.objectContaining({ value: '你好' }),
+      expect.objectContaining({ callId: 'call-1', name: 'read_file', input: { path: 'README.md' } }),
+    ]);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('https://example.com/zen/go/v1/responses');
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer secret');
+    const body = JSON.parse(init.body as string);
+    expect(body).toMatchObject({ model: 'grok-4.5', stream: true, max_output_tokens: 8_192 });
+    expect(body.tools).toEqual([{ type: 'function', name: 'read_file', description: '读取', parameters: { type: 'object', properties: {} } }]);
+  });
+
+  it('把 System 消息提取为 instructions，工具调用与结果转成独立条目', () => {
+    const result = convertResponsesMessages([
+      { role: 3, content: [new vscode.LanguageModelTextPart('你是助手')] } as any,
+      { role: 2, content: [new vscode.LanguageModelToolCallPart('call-1', 'read_file', { path: 'a' })] } as any,
+      { role: 1, content: [new vscode.LanguageModelToolResultPart('call-1', [new vscode.LanguageModelTextPart('ok')])] } as any,
+      { role: 1, content: [new vscode.LanguageModelTextPart('继续')] } as any,
+    ]);
+    expect(result.instructions).toBe('你是助手');
+    expect(result.input).toEqual([
+      { type: 'function_call', call_id: 'call-1', name: 'read_file', arguments: '{"path":"a"}' },
+      { type: 'function_call_output', call_id: 'call-1', output: 'ok' },
+      { role: 'user', content: [{ type: 'input_text', text: '继续' }] },
     ]);
   });
 });

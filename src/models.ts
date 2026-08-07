@@ -31,6 +31,7 @@ export function getProtocolPath(channel: ChannelConfig, protocol: ModelProtocol)
   if (protocol === 'openai') return channel.chatPath;
   if (protocol === 'anthropic') return channel.anthropicPath;
   if (protocol === 'gemini') return channel.geminiPath?.includes('{model}') ? channel.geminiPath : undefined;
+  if (protocol === 'responses') return channel.responsesPath;
   return undefined;
 }
 

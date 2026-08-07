@@ -82,6 +82,7 @@ export class AppService implements vscode.Disposable {
           chatPath: this.normalizedPath(input.chatPath ?? existing?.chatPath ?? defaults.chatPath),
           anthropicPath: this.optionalPath(input.anthropicPath ?? existing?.anthropicPath ?? defaults.anthropicPath),
           geminiPath: this.optionalPath(input.geminiPath ?? existing?.geminiPath ?? defaults.geminiPath),
+          responsesPath: this.optionalPath(input.responsesPath ?? existing?.responsesPath ?? defaults.responsesPath),
           defaultProtocol: this.parseDefaultProtocol(input.defaultProtocol ?? existing?.defaultProtocol ?? defaults.defaultProtocol),
           authMode: this.parseAuthMode(input.authMode ?? existing?.authMode ?? defaults.authMode),
           enabled: input.enabled ?? existing?.enabled ?? true,
@@ -97,6 +98,7 @@ export class AppService implements vscode.Disposable {
           if (!channel.geminiPath.includes('{model}')) throw new Error('Gemini 路径必须包含 {model} 占位符');
           joinEndpoint(channel.baseUrl, channel.geminiPath.replace('{model}', 'test-model'));
         }
+        if (channel.responsesPath) joinEndpoint(channel.baseUrl, channel.responsesPath);
         return existing ? channels.map((item) => item.id === channelId ? channel! : item) : [...channels, channel];
       });
       if (!channel) throw new Error('渠道保存失败');
@@ -202,6 +204,19 @@ export class AppService implements vscode.Disposable {
     this.changeEmitter.fire();
   }
 
+  /** 请求期探测到的协议不是用户手动改的，不置 metadataOverridden，后续目录刷新仍可覆盖。 */
+  async applyDetectedProtocol(channelId: string, modelId: string, protocol: ModelProtocol): Promise<void> {
+    await this.storage.updateModels((models) => models.map((item) => {
+      if (item.channelId !== channelId || item.id !== modelId || item.metadataOverridden) return item;
+      const channel = this.storage.getChannels().find((entry) => entry.id === channelId);
+      if (!channel || !getProtocolPath(channel, protocol)) return item;
+      return { ...item, protocol, providerId: createModelProviderId(channel, item.id, protocol) };
+    }));
+    await this.sync.saveProfileFromLocal();
+    await this.chatBindings.reconcile();
+    this.changeEmitter.fire();
+  }
+
   async resetSync(): Promise<void> {
     await this.sync.reset();
     this.changeEmitter.fire();
@@ -233,7 +248,7 @@ export class AppService implements vscode.Disposable {
   }
 
   private parseDefaultProtocol(value: unknown): ChannelConfig['defaultProtocol'] {
-    return value === 'anthropic' || value === 'gemini' ? value : 'openai';
+    return value === 'anthropic' || value === 'gemini' || value === 'responses' ? value : 'openai';
   }
 
   private parseAuthMode(value: unknown): ChannelAuthMode {

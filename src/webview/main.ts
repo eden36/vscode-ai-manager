@@ -465,6 +465,7 @@ function openChannelForm(channel?: ChannelConfig & { hasCredential?: boolean }):
   byId<HTMLInputElement>('channel-chat-path').value = defaults.chatPath;
   byId<HTMLInputElement>('channel-anthropic-path').value = defaults.anthropicPath ?? '';
   byId<HTMLInputElement>('channel-gemini-path').value = defaults.geminiPath ?? '';
+  byId<HTMLInputElement>('channel-responses-path').value = defaults.responsesPath ?? '';
   byId<HTMLSelectElement>('channel-default-protocol').value = defaults.defaultProtocol;
   byId<HTMLSelectElement>('channel-auth-mode').value = defaults.authMode;
   byId<HTMLInputElement>('channel-api-key').value = '';
@@ -510,6 +511,7 @@ byId<HTMLSelectElement>('channel-preset').addEventListener('change', (event) => 
   byId<HTMLInputElement>('channel-chat-path').value = selected.chatPath;
   byId<HTMLInputElement>('channel-anthropic-path').value = selected.anthropicPath ?? '';
   byId<HTMLInputElement>('channel-gemini-path').value = selected.geminiPath ?? '';
+  byId<HTMLInputElement>('channel-responses-path').value = selected.responsesPath ?? '';
   byId<HTMLSelectElement>('channel-default-protocol').value = selected.defaultProtocol;
   byId<HTMLSelectElement>('channel-auth-mode').value = selected.authMode;
 });
@@ -529,6 +531,7 @@ byId<HTMLFormElement>('channel-form').addEventListener('submit', (event) => {
     chatPath: value('channel-chat-path'),
     anthropicPath: value('channel-anthropic-path'),
     geminiPath: value('channel-gemini-path'),
+    responsesPath: value('channel-responses-path'),
     defaultProtocol: value('channel-default-protocol'),
     authMode: value('channel-auth-mode'),
     apiKey: value('channel-api-key'),
@@ -549,16 +552,25 @@ function openModelEditor(model: CatalogModel): void {
   const container = byId('model-editor');
   const current = state.models.find((item) => item.channelId === model.channelId && item.id === model.id) ?? model;
   const baseline = catalogMetadataBaseline(current);
+  const dialog = document.createElement('dialog');
+  dialog.className = 'app-dialog';
   const form = document.createElement('form');
   form.className = 'card form-card';
+  const header = document.createElement('div');
+  header.className = 'dialog-header';
   const heading = document.createElement('h2');
   heading.textContent = `编辑元数据：${model.name}`;
+  const closeEditor = (): void => dialog.close();
+  const close = button('关闭', closeEditor);
+  close.type = 'button';
+  close.setAttribute('aria-label', '关闭');
+  header.append(heading, close);
   const inputLabel = numericLabel('输入上限', current.maxInputTokens, 1024);
   const outputLabel = numericLabel('输出上限', current.maxOutputTokens, 256);
   const protocolLabel = document.createElement('label');
   protocolLabel.textContent = '调用协议';
   const protocol = document.createElement('select');
-  for (const item of ['openai', 'anthropic', 'gemini', 'unknown']) {
+  for (const item of ['openai', 'anthropic', 'gemini', 'responses', 'unknown']) {
     const option = document.createElement('option');
     option.value = item;
     option.textContent = item;
@@ -585,8 +597,8 @@ function openModelEditor(model: CatalogModel): void {
   };
   const save = button('保存', () => undefined, 'primary');
   save.type = 'submit';
-  actions.append(restore, save, button('取消', () => container.replaceChildren()));
-  form.append(heading, protocolLabel, inputLabel.label, outputLabel.label, actions);
+  actions.append(restore, save, button('取消', closeEditor));
+  form.append(header, protocolLabel, inputLabel.label, outputLabel.label, actions);
   protocol.addEventListener('change', updateRestoreState);
   inputLabel.input.addEventListener('input', updateRestoreState);
   outputLabel.input.addEventListener('input', updateRestoreState);
@@ -594,10 +606,12 @@ function openModelEditor(model: CatalogModel): void {
   form.addEventListener('submit', (event) => {
     event.preventDefault();
     send('saveModel', { channelId: model.channelId, id: model.id, protocol: protocol.value, maxInputTokens: Number(inputLabel.input.value), maxOutputTokens: Number(outputLabel.input.value) });
-    container.replaceChildren();
+    dialog.close();
   });
-  container.replaceChildren(form);
-  form.scrollIntoView({ behavior: 'smooth' });
+  dialog.addEventListener('close', () => container.replaceChildren());
+  dialog.append(form);
+  container.replaceChildren(dialog);
+  dialog.showModal();
 }
 
 function numericLabel(text: string, current: number, min: number): { label: HTMLLabelElement; input: HTMLInputElement } {
@@ -807,6 +821,7 @@ function protocolConfigured(channel: ChannelConfig | undefined, protocol: Catalo
   if (protocol === 'openai') return Boolean(channel.chatPath);
   if (protocol === 'anthropic') return Boolean(channel.anthropicPath);
   if (protocol === 'gemini') return Boolean(channel.geminiPath?.includes('{model}'));
+  if (protocol === 'responses') return Boolean(channel.responsesPath);
   return false;
 }
 

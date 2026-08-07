@@ -10,6 +10,7 @@ export function channel(overrides: Partial<ChannelConfig> = {}): ChannelConfig {
     chatPath: '/v1/chat/completions',
     anthropicPath: '/v1/messages',
     geminiPath: '/v1beta/models/{model}:streamGenerateContent?alt=sse',
+    responsesPath: '/v1/responses',
     defaultProtocol: 'openai',
     authMode: 'bearer',
     enabled: true,
