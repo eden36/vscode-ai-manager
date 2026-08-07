@@ -34,7 +34,6 @@ export function model(overrides: Partial<CatalogModel> = {}): CatalogModel {
     available: true,
     maxInputTokens: 128_000,
     maxOutputTokens: 8_192,
-    toolCalling: true,
     lastSeenAt: 1,
     ...overrides,
   };

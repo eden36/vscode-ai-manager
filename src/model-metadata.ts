@@ -18,6 +18,12 @@ function objectValue(value: unknown): Record<string, unknown> {
 let cache: { fetchedAt: number; payload: Record<string, unknown> } | undefined;
 let pending: Promise<Record<string, unknown> | undefined> | undefined;
 
+/** 缓存是模块级的，测试需要显式清空以保持用例互相独立。 */
+export function resetModelProtocolCache(): void {
+  cache = undefined;
+  pending = undefined;
+}
+
 async function loadMetadata(timeoutMs: number): Promise<Record<string, unknown> | undefined> {
   if (cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) return cache.payload;
   pending ??= (async () => {

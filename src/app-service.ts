@@ -181,7 +181,6 @@ export class AppService implements vscode.Disposable {
       const metadataChanged = input.protocol !== undefined || input.maxInputTokens !== undefined || input.maxOutputTokens !== undefined;
       const maxInputTokens = input.maxInputTokens === undefined ? model.maxInputTokens : this.boundedInteger(input.maxInputTokens, 1_024, 10_000_000, '输入上限');
       const maxOutputTokens = input.maxOutputTokens === undefined ? model.maxOutputTokens : this.boundedInteger(input.maxOutputTokens, 256, 1_000_000, '输出上限');
-      const toolCalling = enabled;
       const baseline = catalogMetadataBaseline(model);
       const matchesCatalog = protocol === baseline.protocol
         && maxInputTokens === baseline.maxInputTokens
@@ -194,7 +193,6 @@ export class AppService implements vscode.Disposable {
         providerId: channel ? createModelProviderId(channel, model.id, protocol) : model.providerId,
         maxInputTokens,
         maxOutputTokens,
-        toolCalling,
         metadataOverridden: !metadataChanged ? model.metadataOverridden : !matchesCatalog,
       };
       return models.map((item) => item.channelId === updated.channelId && item.id === updated.id ? updated : item);

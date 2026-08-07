@@ -272,7 +272,6 @@ export class SyncService {
       providerId,
       customAlias: preference.customAlias,
       enabled,
-      toolCalling: enabled,
       ...(preference.metadataOverridden ? {
         protocol,
         maxInputTokens: preference.maxInputTokens,

@@ -23,8 +23,9 @@ export function isModelUsable(model: CatalogModel, channel: ChannelConfig | unde
   return Boolean(channel?.enabled && model.enabled && model.available && channel && getProtocolPath(channel, model.protocol));
 }
 
+/** 目录显式声明时以目录为准；未声明时沿用乐观默认，否则不返回能力字段的渠道会整批退出 agent 模式。 */
 export function modelReportsToolCalling(model: CatalogModel): boolean {
-  return model.enabled;
+  return model.supportsTools ?? model.enabled;
 }
 
 export function getProtocolPath(channel: ChannelConfig, protocol: ModelProtocol): string | undefined {

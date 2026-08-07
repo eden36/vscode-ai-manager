@@ -19,7 +19,12 @@ describe('parseModelCatalog', () => {
 
   it('读取模型能力与限制元数据', () => {
     const [result] = parseModelCatalog({ models: [{ id: 'tools', limits: { context: 200_000, output: 16_000 }, capabilities: { tools: true } }] }, channel());
-    expect(result).toMatchObject({ maxInputTokens: 200_000, maxOutputTokens: 16_000, toolCalling: true });
+    expect(result).toMatchObject({ maxInputTokens: 200_000, maxOutputTokens: 16_000, supportsTools: true });
+  });
+
+  it('区分目录显式否定工具调用与目录未声明', () => {
+    expect(parseModelCatalog({ data: [{ id: 'denied', capabilities: { tools: false } }] }, channel())[0]?.supportsTools).toBe(false);
+    expect(parseModelCatalog({ data: [{ id: 'silent' }] }, channel())[0]?.supportsTools).toBeUndefined();
   });
 
   it('只在 OpenCode Go 预设中保守标记已知 Messages 系列', () => {
@@ -39,6 +44,12 @@ describe('parseModelCatalog', () => {
 
   it('显式协议字段优先于外部协议元数据', () => {
     expect(inferProtocol({ id: 'grok-4.5', endpoint: '/v1/messages' }, undefined, new Map([['grok-4.5', 'responses']]))).toBe('anthropic');
+  });
+
+  it('外部协议元数据可匹配 name 键与 models/ 前缀的目录条目', () => {
+    const overrides = new Map<string, ModelProtocol>([['gemini-3-flash', 'gemini']]);
+    expect(parseModelCatalog({ models: [{ name: 'models/gemini-3-flash' }] }, channel(), Date.now(), overrides)[0])
+      .toMatchObject({ id: 'gemini-3-flash', protocol: 'gemini' });
   });
 
   it('显式协议优先于模型 ID 推断', () => {
@@ -78,13 +89,13 @@ describe('catalogMetadataBaseline', () => {
         protocol: 'anthropic',
         maxInputTokens: 128_000,
         maxOutputTokens: 8_192,
-        toolCalling: false,
+        supportsTools: false,
       },
     }))).toEqual({
       protocol: 'anthropic',
       maxInputTokens: 128_000,
       maxOutputTokens: 8_192,
-      toolCalling: false,
+      supportsTools: false,
     });
   });
 });
@@ -130,7 +141,7 @@ describe('CatalogService 目录合并', () => {
         protocol: 'openai',
         maxInputTokens: 128_000,
         maxOutputTokens: 8_192,
-        toolCalling: false,
+        supportsTools: undefined,
       },
     });
     expect(models.find((item) => item.id === 'new')).toMatchObject({ enabled: false, available: true });
@@ -164,7 +175,7 @@ describe('CatalogService 目录合并', () => {
         protocol: 'anthropic',
         maxInputTokens: 128_000,
         maxOutputTokens: 8_192,
-        toolCalling: true,
+        supportsTools: true,
       },
     })];
     let channels = [channel()];
@@ -187,7 +198,7 @@ describe('CatalogService 目录合并', () => {
         protocol: 'openai',
         maxInputTokens: 200_000,
         maxOutputTokens: 16_000,
-        toolCalling: true,
+        supportsTools: true,
       },
     });
   });

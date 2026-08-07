@@ -13,10 +13,23 @@ type ClientProtocol = 'openai' | 'anthropic' | 'gemini' | 'responses';
 
 const PROTOCOL_FALLBACK_ORDER: readonly ClientProtocol[] = ['openai', 'responses', 'anthropic', 'gemini'];
 
-function isProtocolMismatch(error: unknown): boolean {
-  return error instanceof RequestError
-    && !error.responseStarted
-    && (error.status === 404 || error.status === 503);
+/** 503 时只在同族方言之间互换：实际遇到的协议错配几乎都是 OpenAI 的两种方言配反。 */
+const TRANSIENT_ALTERNATIVE: Record<ClientProtocol, ClientProtocol> = {
+  openai: 'responses',
+  responses: 'openai',
+  anthropic: 'openai',
+  gemini: 'openai',
+};
+
+/**
+ * 404 说明该协议端点确实不存在，可以放心遍历其他协议并记住结果；
+ * 503 更多是上游临时不可用，遍历会成倍消耗配额，侥幸成功也不该固化成模型协议。
+ */
+function protocolMismatchKind(error: unknown): 'structural' | 'transient' | undefined {
+  if (!(error instanceof RequestError) || error.responseStarted) return undefined;
+  if (error.status === 404) return 'structural';
+  if (error.status === 503) return 'transient';
+  return undefined;
 }
 
 export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvider, vscode.Disposable {
@@ -98,8 +111,8 @@ export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvid
   }
 
   /**
-   * 渠道对「模型存在但该协议端点没有上游」通常回 404/503，此时换一个已配置的协议重试一次，
-   * 成功后把探测结果写回目录，避免每次调用都先失败一轮。
+   * 渠道对「模型存在但该协议端点没有上游」通常回 404，此时遍历其他已配置协议重试，
+   * 成功后把探测结果写回目录，避免每次调用都先失败一轮；503 只保守试一个同族协议且不写回。
    */
   private async streamWithProtocolFallback(
     target: ResolvedCandidate,
@@ -113,18 +126,22 @@ export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvid
     try {
       return await this.clients[model.protocol as ClientProtocol].streamChat(target, apiKey, messages, options, progress, token);
     } catch (error) {
-      if (!isProtocolMismatch(error) || model.metadataOverridden) throw error;
-      for (const candidate of PROTOCOL_FALLBACK_ORDER) {
+      const kind = protocolMismatchKind(error);
+      if (!kind || model.metadataOverridden) throw error;
+      const alternatives = kind === 'structural'
+        ? PROTOCOL_FALLBACK_ORDER
+        : [TRANSIENT_ALTERNATIVE[model.protocol as ClientProtocol]];
+      for (const candidate of alternatives) {
         if (candidate === model.protocol || !getProtocolPath(channel, candidate)) continue;
         try {
           const result = await this.clients[candidate].streamChat(
             { channel, model: { ...model, protocol: candidate } }, apiKey, messages, options, progress, token,
           );
           this.output.appendLine(`[${new Date().toISOString()}] 渠道=${channel.name} 模型=${model.id} 协议自动切换为 ${candidate}`);
-          void this.app.applyDetectedProtocol(channel.id, model.id, candidate);
+          if (kind === 'structural') void this.app.applyDetectedProtocol(channel.id, model.id, candidate);
           return result;
         } catch (retryError) {
-          if (!isProtocolMismatch(retryError)) throw retryError;
+          if (!protocolMismatchKind(retryError)) throw retryError;
         }
       }
       throw error;

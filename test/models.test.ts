@@ -37,9 +37,14 @@ describe('模型显示与排序', () => {
     expect(exposed.map((item) => item.id)).toEqual(['model-1', 'anthropic']);
   });
 
-  it('仅对已启用模型声明工具调用能力', () => {
+  it('目录未声明工具调用能力时跟随启用状态', () => {
     expect(modelReportsToolCalling(model({ enabled: true }))).toBe(true);
     expect(modelReportsToolCalling(model({ enabled: false }))).toBe(false);
+  });
+
+  it('目录显式声明工具调用能力时以目录为准', () => {
+    expect(modelReportsToolCalling(model({ enabled: true, supportsTools: false }))).toBe(false);
+    expect(modelReportsToolCalling(model({ enabled: false, supportsTools: true }))).toBe(true);
   });
 });
 

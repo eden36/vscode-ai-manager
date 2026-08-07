@@ -46,10 +46,13 @@ Newly discovered models are disabled by default.
 | OpenAI | Chat Completions | `/v1/chat/completions` |
 | Anthropic | Messages | `/v1/messages` |
 | Gemini | `streamGenerateContent` | `/v1beta/models/{model}:streamGenerateContent?alt=sse` |
+| OpenAI Responses | Responses | `/v1/responses` |
 
-Custom channels can configure independent endpoints for all three protocols and use Bearer, `x-api-key`, or `x-goog-api-key` authentication. A Gemini endpoint must include the `{model}` placeholder.
+Custom channels can configure independent endpoints for all four protocols and use Bearer, `x-api-key`, or `x-goog-api-key` authentication. A Gemini endpoint must include the `{model}` placeholder.
 
-OpenCode Go automatically infers the protocol for known model families. You can override the protocol, token limits, and tool-calling capability from the model editor.
+The protocol of each model is resolved in this order: explicit fields in the channel catalog, protocol metadata from `models.dev`, local rules for known model families, and finally the channel default. If a request fails because the endpoint for the selected protocol does not exist, AI Manager retries once with another configured protocol and remembers the result.
+
+You can override the protocol and token limits from the model editor. Tool-calling capability comes from the model catalog: it is reported as declared when the catalog states it, and assumed available otherwise.
 
 ## Cross-device Sync
 
@@ -69,6 +72,8 @@ On another computer, sign in to the same VS Code account, enable `Settings Sync`
 ## Privacy
 
 Request logs contain only the channel, alias, model ID, duration, HTTP status, and error category. AI Manager does not log prompts, responses, credentials, the sync master password, or derived keys, and it does not read local OpenCode authentication files.
+
+When a model catalog is refreshed, AI Manager also requests `https://models.dev/api.json` to determine which wire protocol each model uses. That request carries no API key and no user data, and its result is cached for six hours.
 
 ## Development
 

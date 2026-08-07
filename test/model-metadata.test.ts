@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchModelProtocols } from '../src/model-metadata';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { fetchModelProtocols, resetModelProtocolCache } from '../src/model-metadata';
 import { channel } from './fixtures';
 
 const payload = {
@@ -23,9 +23,9 @@ function stubFetch(): ReturnType<typeof vi.fn> {
   return fetchMock;
 }
 
+beforeEach(() => resetModelProtocolCache());
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-/** 用例按顺序共享模块级缓存：先验证空缓存下的失败回落，再验证成功拉取与缓存复用。 */
 describe('fetchModelProtocols', () => {
   it('拉取失败时返回 undefined，不抛出异常', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
@@ -44,7 +44,8 @@ describe('fetchModelProtocols', () => {
   it('命中缓存后不再重复请求元数据', async () => {
     const fetchMock = stubFetch();
     await fetchModelProtocols(goChannel, 5_000);
-    expect(fetchMock).not.toHaveBeenCalled();
+    await fetchModelProtocols(goChannel, 5_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('渠道端点匹配不到 provider 时返回 undefined', async () => {

@@ -5,15 +5,15 @@ export function catalogMetadataBaseline(model: CatalogModel): CatalogModelMetada
     protocol: model.protocol,
     maxInputTokens: model.maxInputTokens,
     maxOutputTokens: model.maxOutputTokens,
-    toolCalling: model.toolCalling,
+    supportsTools: model.supportsTools,
   };
 }
 
-export function catalogMetadataFrom(model: Pick<CatalogModel, 'protocol' | 'maxInputTokens' | 'maxOutputTokens' | 'toolCalling'>): CatalogModelMetadata {
+export function catalogMetadataFrom(model: Pick<CatalogModel, 'protocol' | 'maxInputTokens' | 'maxOutputTokens' | 'supportsTools'>): CatalogModelMetadata {
   return {
     protocol: model.protocol,
     maxInputTokens: model.maxInputTokens,
     maxOutputTokens: model.maxOutputTokens,
-    toolCalling: model.toolCalling,
+    supportsTools: model.supportsTools,
   };
 }

@@ -104,7 +104,7 @@ describe('AppService', () => {
         protocol: 'anthropic',
         maxInputTokens: 128_000,
         maxOutputTokens: 8_192,
-        toolCalling: true,
+        supportsTools: true,
       },
     })];
     const storage = {
@@ -129,8 +129,8 @@ describe('AppService', () => {
     });
   });
 
-  it('启用模型时同步声明工具调用能力', async () => {
-    let models = [model({ enabled: false, toolCalling: false })];
+  it('启用模型不覆盖目录声明的工具调用能力', async () => {
+    let models = [model({ enabled: false, supportsTools: false })];
     const storage = {
       getChannels: () => [channel()],
       updateModels: async (update: (value: typeof models) => typeof models) => { models = update(models); return models; },
@@ -140,7 +140,7 @@ describe('AppService', () => {
 
     await app.saveModel({ channelId: 'channel-1', id: 'model-1', enabled: true });
 
-    expect(models[0]).toMatchObject({ enabled: true, toolCalling: true });
+    expect(models[0]).toMatchObject({ enabled: true, supportsTools: false });
   });
 
   it('getDashboardState 暴露只读状态', async () => {

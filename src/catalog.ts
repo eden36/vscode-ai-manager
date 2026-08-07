@@ -19,6 +19,11 @@ function positiveNumber(...values: unknown[]): number | undefined {
   return undefined;
 }
 
+function modelIdentifier(raw: Record<string, unknown>): string {
+  const value = typeof raw.id === 'string' ? raw.id : typeof raw.name === 'string' ? raw.name : '';
+  return value.trim().replace(/^models\//, '');
+}
+
 export function inferProtocol(
   raw: Record<string, unknown>,
   channel?: ChannelConfig,
@@ -31,7 +36,8 @@ export function inferProtocol(
   if (explicit.includes('anthropic') || explicit.includes('/messages')) return 'anthropic';
   if (explicit.includes('gemini') || explicit.includes('generatecontent')) return 'gemini';
   if (explicit.includes('openai') || explicit.includes('chat-completions') || explicit.includes('chat/completions')) return 'openai';
-  const rawId = typeof raw.id === 'string' ? raw.id : '';
+  // Gemini 形态的目录用 name 承载模型标识且带 models/ 前缀，外部协议元数据的键则不带前缀。
+  const rawId = modelIdentifier(raw);
   const override = protocolOverrides?.get(rawId);
   if (override) return override;
   const modelId = rawId.toLowerCase();
@@ -72,11 +78,10 @@ export function parseModelCatalog(
       limits.output,
       limits.completion,
     ) ?? channel.defaultMaxOutputTokens;
-    const toolCalling = raw.toolCalling === true
-      || raw.tool_calling === true
-      || capabilities.toolCalling === true
-      || capabilities.tool_calling === true
-      || capabilities.tools === true;
+    // 多数 OpenAI 兼容目录根本不返回能力字段，这里保留 undefined 让调用方回落到乐观默认，
+    // 只有目录显式给出布尔值时才当作声明。
+    const supportsTools = [raw.toolCalling, raw.tool_calling, capabilities.toolCalling, capabilities.tool_calling, capabilities.tools]
+      .find((value) => typeof value === 'boolean') as boolean | undefined;
     return [{
       channelId: channel.id,
       id,
@@ -88,7 +93,7 @@ export function parseModelCatalog(
       available: true,
       maxInputTokens,
       maxOutputTokens,
-      toolCalling,
+      supportsTools,
       lastSeenAt: now,
     }];
   });
@@ -162,7 +167,6 @@ export class CatalogService {
             providerId: createModelProviderId(channel, model.id, protocol),
             customAlias: old?.customAlias,
             enabled,
-            toolCalling: enabled,
           };
           const mergedModel = old?.metadataOverridden
             ? { ...stable, protocol: old.protocol, maxInputTokens: old.maxInputTokens, maxOutputTokens: old.maxOutputTokens, metadataOverridden: true }

@@ -55,7 +55,8 @@ export interface CatalogModel {
   available: boolean;
   maxInputTokens: number;
   maxOutputTokens: number;
-  toolCalling: boolean;
+  /** 模型目录显式声明的工具调用能力；undefined 表示目录未声明，由调用方决定默认值。 */
+  supportsTools?: boolean;
   lastSeenAt: number;
   metadataOverridden?: boolean;
   catalogMetadata?: CatalogModelMetadata;
@@ -65,7 +66,7 @@ export interface CatalogModelMetadata {
   protocol: ModelProtocol;
   maxInputTokens: number;
   maxOutputTokens: number;
-  toolCalling: boolean;
+  supportsTools?: boolean;
 }
 
 export interface ChatModelTarget {

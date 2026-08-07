@@ -46,10 +46,13 @@ AI Manager 是一个 VS Code 桌面扩展，用于集中管理 OpenAI-compatible
 | OpenAI | Chat Completions | `/v1/chat/completions` |
 | Anthropic | Messages | `/v1/messages` |
 | Gemini | `streamGenerateContent` | `/v1beta/models/{model}:streamGenerateContent?alt=sse` |
+| OpenAI Responses | Responses | `/v1/responses` |
 
-自定义渠道可以分别配置三种协议的接口，并使用 Bearer、`x-api-key` 或 `x-goog-api-key` 认证。Gemini 接口路径必须包含 `{model}` 占位符。
+自定义渠道可以分别配置四种协议的接口，并使用 Bearer、`x-api-key` 或 `x-goog-api-key` 认证。Gemini 接口路径必须包含 `{model}` 占位符。
 
-OpenCode Go 会自动推断已知模型系列使用的协议。你也可以在模型编辑器中手动修改协议、Token 上限和工具调用能力。
+每个模型使用的协议按以下顺序判定：渠道目录中的显式字段、`models.dev` 提供的协议元数据、已知模型系列的本地规则，最后是渠道默认协议。若请求因所选协议的接口不存在而失败，AI Manager 会用另一个已配置的协议重试一次，并记住结果。
+
+你可以在模型编辑器中手动修改协议和 Token 上限。工具调用能力取自模型目录：目录明确声明时按声明上报，目录未声明时默认视为支持。
 
 ## 跨设备同步
 
@@ -69,6 +72,8 @@ OpenCode Go 会自动推断已知模型系列使用的协议。你也可以在�
 ## 隐私
 
 请求日志只包含渠道、别名、模型 ID、耗时、HTTP 状态和错误类别。AI Manager 不会记录提示词、响应正文、凭据、同步主密码或派生密钥，也不会读取本机 OpenCode 认证文件。
+
+刷新模型目录时，AI Manager 还会请求 `https://models.dev/api.json` 以判断各模型使用的接口协议。该请求不携带 API Key 和任何用户数据，结果会缓存 6 小时。
 
 ## 开发
 
