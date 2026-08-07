@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { classifyHttpError, readHttpErrorDetail, RequestError } from './errors';
+import { classifyHttpError, readHttpErrorDetail, RequestError, streamErrorMessage } from './errors';
 import { extractMessageText, normalizeMessageRole } from './message-roles';
 import type { StreamResult } from './openai-client';
 import { openAiToolParameters } from './openai-client';
@@ -91,7 +91,7 @@ async function streamGeminiRequest(target: ResolvedCandidate, apiKey: string | u
       if (!event || event.data === '[DONE]') return;
       let payload: any;
       try { payload = JSON.parse(event.data); } catch { throw new RequestError('渠道返回了无效的 Gemini SSE 数据', 'network', undefined, false, responseStarted); }
-      if (payload.error) throw new RequestError('渠道在响应流中返回错误', 'server', undefined, false, responseStarted);
+      if (payload.error) throw new RequestError(streamErrorMessage(payload), 'server', undefined, false, responseStarted);
       for (const [candidateIndex, candidate] of (payload.candidates ?? []).entries()) {
         for (const [partIndex, part] of (candidate.content?.parts ?? []).entries()) {
           if (typeof part.text === 'string' && part.text) { responseStarted = streamed = true; progress.report(new vscode.LanguageModelTextPart(part.text)); }

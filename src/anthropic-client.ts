@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { classifyHttpError, readHttpErrorDetail, RequestError } from './errors';
+import { classifyHttpError, readHttpErrorDetail, RequestError, streamErrorMessage } from './errors';
 import { apiKeyHeaders, createRequestControl, parseSseEvent, protocolUrl } from './protocol-http';
 import type { ResolvedCandidate } from './types';
 import { extractMessageText, normalizeMessageRole } from './message-roles';
@@ -84,7 +84,7 @@ async function streamAnthropicRequest(target: ResolvedCandidate, apiKey: string 
       if (!parsedEvent) return;
       let payload: any;
       try { payload = JSON.parse(parsedEvent.data); } catch { throw new RequestError('渠道返回了无效的 Anthropic SSE 数据', 'network', undefined, false, responseStarted); }
-      if (parsedEvent.event === 'error' || payload.type === 'error') throw new RequestError('渠道在响应流中返回错误', 'server', undefined, false, responseStarted);
+      if (parsedEvent.event === 'error' || payload.type === 'error') throw new RequestError(streamErrorMessage(payload), 'server', undefined, false, responseStarted);
       if (payload.type === 'content_block_start' && payload.content_block?.type === 'tool_use') {
         responseStarted = true;
         const initialInput = payload.content_block.input && Object.keys(payload.content_block.input).length

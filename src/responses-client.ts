@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { classifyHttpError, readHttpErrorDetail, RequestError } from './errors';
+import { classifyHttpError, readHttpErrorDetail, RequestError, streamErrorMessage } from './errors';
 import { apiKeyHeaders, createRequestControl, parseSseEvent, protocolUrl } from './protocol-http';
 import type { ResolvedCandidate } from './types';
 import { extractMessageText, normalizeMessageRole } from './message-roles';
@@ -103,7 +103,7 @@ async function streamResponsesRequest(
       try { payload = JSON.parse(parsedEvent.data); } catch { throw new RequestError('渠道返回了无效的 Responses SSE 数据', 'network', undefined, false, responseStarted); }
       const type = typeof payload.type === 'string' ? payload.type : parsedEvent.event;
       if (type === 'error' || type === 'response.failed' || payload.error) {
-        throw new RequestError('渠道在响应流中返回错误', 'server', undefined, false, responseStarted);
+        throw new RequestError(streamErrorMessage(payload), 'server', undefined, false, responseStarted);
       }
       if (type === 'response.output_text.delta' && typeof payload.delta === 'string' && payload.delta) {
         responseStarted = streamed = true;

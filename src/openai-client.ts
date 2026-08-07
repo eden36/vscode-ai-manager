@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { classifyHttpError, readHttpErrorDetail, RequestError } from './errors';
+import { classifyHttpError, readHttpErrorDetail, RequestError, streamErrorMessage } from './errors';
 import { joinEndpoint } from './catalog';
 import type { ResolvedCandidate } from './types';
 import { extractMessageText, normalizeMessageRole } from './message-roles';
@@ -153,7 +153,7 @@ export class OpenAIClient {
         } catch {
           throw new RequestError('渠道返回了无效的 SSE 数据', 'network', undefined, false, responseStarted);
         }
-        if (parsed?.error) throw new RequestError('渠道在响应流中返回错误', 'server', undefined, false, responseStarted);
+        if (parsed?.error) throw new RequestError(streamErrorMessage(parsed), 'server', undefined, false, responseStarted);
         const delta = parsed.choices?.[0]?.delta;
         if (typeof delta?.content === 'string' && delta.content) {
           responseStarted = true;
