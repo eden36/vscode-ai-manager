@@ -322,6 +322,42 @@ describe('SyncService', () => {
     expect(sync.getStatus()).toMatchObject({ cloudState: 'error', error: '同步状态分块尚未完整到达' });
   });
 
+  it('远端快照分块陆续到达时不误报错误', async () => {
+    const publisher = new SyncService(storage);
+    await publisher.initialize();
+    await storage.updateChannels((channels) => channels.map((item) => ({ ...item, name: '远端渠道名' })));
+    await publisher.saveProfileFromLocal();
+    const publishedManifest = storage.getSyncManifest()!;
+    const publishedChunks = Array.from(
+      { length: publishedManifest.chunkCount },
+      (_, index) => storage.getSyncChunk(publishedManifest.snapshotId, index)!,
+    );
+
+    const consumer = createContext();
+    const consumerStorage = await createTestStorage(consumer.context, 'device-consumer');
+    await consumerStorage.saveChannels([channel()]);
+    const sync = new SyncService(consumerStorage);
+    await sync.initialize();
+    consumer.values.set('aiManager.sync.manifest.v4', {
+      ...publishedManifest,
+      updatedAt: publishedManifest.updatedAt + 1,
+    });
+
+    await sync.reconcile();
+    await sync.reconcile();
+    expect(sync.getStatus().cloudState).toBe('synced');
+    expect(consumerStorage.getChannels()[0]?.name).toBe('测试渠道');
+
+    for (let index = 0; index < publishedChunks.length; index += 1) {
+      consumer.values.set(`aiManager.sync.chunk.v4.${publishedManifest.snapshotId}.${index}`, publishedChunks[index]);
+    }
+    await sync.reconcile();
+    expect(sync.getStatus().cloudState).toBe('synced');
+    expect(sync.getStatus().error).toBeUndefined();
+    expect(consumerStorage.getChannels()[0]?.name).toBe('远端渠道名');
+    consumerStorage.dispose();
+  });
+
   it('只保留当前发布端最近两个快照', async () => {
     const sync = new SyncService(storage);
     await sync.initialize();

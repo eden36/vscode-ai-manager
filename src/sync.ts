@@ -13,6 +13,9 @@ const PBKDF2_ITERATIONS = 600_000;
 const KEY_LENGTH = 32;
 const CHUNK_SIZE = 48 * 1024;
 const MAX_SYNC_CHUNKS = 256;
+const INCOMPLETE_CHUNK_ATTEMPTS = 3;
+const INCOMPLETE_CHUNK_ERROR = '同步状态分块尚未完整到达';
+const VAULT_AHEAD_ERROR = '同步保险库代次超前，等待状态分块到达';
 const AAD = Buffer.from('ai-manager:v2', 'utf8');
 const deflate = promisify(deflateRaw);
 const inflate = promisify(inflateRaw);
@@ -169,6 +172,9 @@ export class SyncService {
   private locked = false;
   private lastError: string | undefined;
   private consecutiveFailures = 0;
+  private pendingManifestKey = '';
+  private pendingChunkAttempts = 0;
+  private pendingChunkArrived = 0;
 
   constructor(private readonly storage: StorageService) {
     storage.registerSyncKeys();
@@ -219,6 +225,7 @@ export class SyncService {
       this.locked = false;
       this.lastError = undefined;
       this.consecutiveFailures = 0;
+      this.clearPendingChunks();
     });
   }
 
@@ -291,8 +298,14 @@ export class SyncService {
       this.lastError = undefined;
       return { stateChanged, vaultChanged };
     } catch (error) {
+      const message = error instanceof Error ? error.message : '同步失败';
+      if (message === INCOMPLETE_CHUNK_ERROR || message === VAULT_AHEAD_ERROR) {
+        this.lastError = message;
+        if (throwOnError) throw error;
+        return { stateChanged: false, vaultChanged: false };
+      }
       this.consecutiveFailures += 1;
-      if (this.consecutiveFailures >= 3) this.lastError = error instanceof Error ? error.message : '同步失败';
+      if (this.consecutiveFailures >= 3) this.lastError = message;
       if (throwOnError) throw error;
       return { stateChanged: false, vaultChanged: false };
     }
@@ -307,7 +320,11 @@ export class SyncService {
     const key = manifestKey(manifest);
     if (key === this.lastAppliedManifest) return false;
     const chunks = Array.from({ length: manifest.chunkCount }, (_, index) => this.storage.getSyncChunk(manifest.snapshotId, index));
-    if (chunks.some((chunk) => chunk === undefined)) throw new Error('同步状态分块尚未完整到达');
+    if (chunks.some((chunk) => chunk === undefined)) {
+      this.notePendingChunks(manifest, chunks);
+      return false;
+    }
+    this.clearPendingChunks();
     const remote = await decodeSharedState(manifest, chunks as string[]);
     if (manifest.reset) {
       if (manifest.generation <= this.storage.getAppliedResetGeneration()) {
@@ -350,7 +367,7 @@ export class SyncService {
     const remote = this.storage.getSyncedVaultBundle();
     const generation = this.storage.getSyncGeneration();
     if (remote) validateBundle(remote);
-    if (remote && remote.generation > generation) throw new Error('同步保险库代次超前，等待状态分块到达');
+    if (remote && remote.generation > generation) return false;
     const applicableRemote = remote?.generation === generation ? remote : undefined;
     const localCredentials = await this.readLocalCredentials();
     const manifest = this.storage.getSyncManifest();
@@ -421,6 +438,28 @@ export class SyncService {
     const result = this.operationQueue.then(operation);
     this.operationQueue = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  private notePendingChunks(manifest: SyncManifestV4, chunks: readonly (string | undefined)[]): void {
+    const key = manifestKey(manifest);
+    const arrived = chunks.filter((chunk): chunk is string => chunk !== undefined).length;
+    if (this.pendingManifestKey !== key) {
+      this.pendingManifestKey = key;
+      this.pendingChunkAttempts = 0;
+      this.pendingChunkArrived = arrived;
+    } else if (arrived > this.pendingChunkArrived) {
+      this.pendingChunkArrived = arrived;
+      this.pendingChunkAttempts = 0;
+      return;
+    }
+    this.pendingChunkAttempts += 1;
+    if (this.pendingChunkAttempts >= INCOMPLETE_CHUNK_ATTEMPTS) throw new Error(INCOMPLETE_CHUNK_ERROR);
+  }
+
+  private clearPendingChunks(): void {
+    this.pendingManifestKey = '';
+    this.pendingChunkAttempts = 0;
+    this.pendingChunkArrived = 0;
   }
 }
 
