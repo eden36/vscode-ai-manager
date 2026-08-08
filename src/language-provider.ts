@@ -5,6 +5,7 @@ import { GeminiClient } from './gemini-client';
 import { ResponsesClient } from './responses-client';
 import { estimateTokens, getExposedModels, getModelDisplayName, getProtocolPath, isModelUsable, modelReportsToolCalling } from './models';
 import { RequestError, safeErrorMessage, shouldNotifyLanguageModelFailure } from './errors';
+import { reasoningEffortConfigurationSchema } from './reasoning-effort';
 import type { AppService } from './app-service';
 import type { StreamResult } from './openai-client';
 import type { ResolvedCandidate } from './types';
@@ -59,6 +60,7 @@ export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvid
     const models = getExposedModels(channels, this.app.storage.getModels()).flatMap((model) => {
       const channel = channels.find((item) => item.id === model.channelId);
       if (!channel) return [];
+      const configurationSchema = reasoningEffortConfigurationSchema(model.reasoningEfforts ?? []);
       return [{
         id: model.providerId,
         name: getModelDisplayName(model, channel),
@@ -69,6 +71,7 @@ export class AiManagerLanguageProvider implements vscode.LanguageModelChatProvid
         tooltip: `${channel.name} / ${model.name}`,
         detail: 'AI Manager 模型',
         capabilities: { imageInput: false, toolCalling: modelReportsToolCalling(model) },
+        ...(configurationSchema ? { configurationSchema } : {}),
       }];
     });
     if (!options.silent) {

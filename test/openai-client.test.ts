@@ -86,6 +86,36 @@ describe('OpenAIClient', () => {
     });
   });
 
+  it('仅将模型声明的推理强度映射到 reasoning_effort', async () => {
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      void url;
+      void init;
+      return Promise.resolve(sseResponse([{ choices: [{ delta: { content: 'ok' } }] }]));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await new OpenAIClient().streamChat(
+      { ...target, model: model({ reasoningEfforts: ['low', 'high'] }) },
+      undefined,
+      [{ role: 1, name: undefined, content: [new vscode.LanguageModelTextPart('hi')] } as any],
+      { modelConfiguration: { reasoningEffort: 'high' } } as any,
+      { report: () => undefined },
+      token as any,
+    );
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body.reasoning_effort).toBe('high');
+
+    await new OpenAIClient().streamChat(
+      { ...target, model: model({ reasoningEfforts: ['low', 'high'] }) },
+      undefined,
+      [{ role: 1, name: undefined, content: [new vscode.LanguageModelTextPart('hi')] } as any],
+      { modelConfiguration: { reasoningEffort: 'default' } } as any,
+      { report: () => undefined },
+      token as any,
+    );
+    const defaultBody = JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body));
+    expect(defaultBody.reasoning_effort).toBeUndefined();
+  });
+
   it('解析没有末尾换行的最后一个 SSE 事件并转发必选工具模式', async () => {
     const response = new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: '完成' } }] })}`, { status: 200 });
     const fetchMock = vi.fn().mockResolvedValue(response);

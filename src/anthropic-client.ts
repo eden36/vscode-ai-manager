@@ -5,6 +5,7 @@ import type { ResolvedCandidate } from './types';
 import { extractMessageText, normalizeMessageRole } from './message-roles';
 import type { StreamResult } from './openai-client';
 import { openAiToolParameters } from './openai-client';
+import { resolveReasoningEffort } from './reasoning-effort';
 
 type AnthropicBlock =
   | { type: 'text'; text: string }
@@ -54,11 +55,13 @@ export class AnthropicClient {
       description: tool.description ?? tool.name,
       input_schema: openAiToolParameters(tool.inputSchema),
     }));
+    const reasoningEffort = resolveReasoningEffort(target.model, options);
     return streamAnthropicRequest(target, apiKey, {
       model: target.model.id,
       max_tokens: target.model.maxOutputTokens,
       messages: converted.messages,
       stream: true,
+      ...(reasoningEffort ? { output_config: { effort: reasoningEffort } } : {}),
       ...(converted.system ? { system: converted.system } : {}),
       ...(tools?.length ? { tools, tool_choice: { type: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'any' : 'auto' } } : {}),
     }, progress, token);

@@ -1,4 +1,5 @@
 import type { CatalogModel, ChannelConfig, ChatBindingRecord, ChatSettingKey } from './types';
+import { isReasoningEffort } from './reasoning-effort';
 
 export interface VersionedRecord<T> {
   revision: number;
@@ -199,7 +200,9 @@ function isCatalogModel(value: unknown): boolean {
     && typeof value.id === 'string'
     && typeof value.providerId === 'string'
     && typeof value.maxInputTokens === 'number'
-    && typeof value.maxOutputTokens === 'number';
+    && typeof value.maxOutputTokens === 'number'
+    && (value.reasoningEfforts === undefined
+      || (Array.isArray(value.reasoningEfforts) && value.reasoningEfforts.every(isReasoningEffort)));
 }
 
 function isRefreshState(value: unknown): boolean {

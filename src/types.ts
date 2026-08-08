@@ -13,6 +13,7 @@ export type ChannelPreset =
   | 'together'
   | 'xai';
 export type ModelProtocol = 'openai' | 'anthropic' | 'gemini' | 'responses' | 'unknown';
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type ChannelAuthMode = 'bearer' | 'anthropic-api-key' | 'google-api-key';
 export type ChatSettingKey =
   | 'chat.defaultModel'
@@ -57,6 +58,8 @@ export interface CatalogModel {
   maxOutputTokens: number;
   /** 模型目录显式声明的工具调用能力；undefined 表示目录未声明，由调用方决定默认值。 */
   supportsTools?: boolean;
+  /** 外部模型元数据明确声明的推理强度档位。 */
+  reasoningEfforts?: ReasoningEffort[];
   lastSeenAt: number;
   metadataOverridden?: boolean;
   catalogMetadata?: CatalogModelMetadata;
@@ -67,6 +70,7 @@ export interface CatalogModelMetadata {
   maxInputTokens: number;
   maxOutputTokens: number;
   supportsTools?: boolean;
+  reasoningEfforts?: ReasoningEffort[];
 }
 
 export interface ChatModelTarget {

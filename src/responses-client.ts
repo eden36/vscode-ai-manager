@@ -5,6 +5,7 @@ import type { ResolvedCandidate } from './types';
 import { extractMessageText, normalizeMessageRole } from './message-roles';
 import type { StreamResult } from './openai-client';
 import { openAiToolParameters } from './openai-client';
+import { resolveReasoningEffort } from './reasoning-effort';
 
 type ResponsesInputItem =
   | { role: 'user' | 'assistant'; content: Array<{ type: 'input_text' | 'output_text'; text: string }> }
@@ -61,11 +62,13 @@ export class ResponsesClient {
       description: tool.description ?? tool.name,
       parameters: openAiToolParameters(tool.inputSchema),
     }));
+    const reasoningEffort = resolveReasoningEffort(target.model, options);
     return streamResponsesRequest(target, apiKey, {
       model: target.model.id,
       input: converted.input,
       stream: true,
       max_output_tokens: target.model.maxOutputTokens,
+      ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
       ...(converted.instructions ? { instructions: converted.instructions } : {}),
       ...(tools?.length ? {
         tools,

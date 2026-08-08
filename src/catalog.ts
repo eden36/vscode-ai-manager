@@ -6,7 +6,8 @@ import { createModelProviderId, getProtocolPath } from './models';
 import { StorageService } from './storage';
 import type { SyncService } from './sync';
 import { apiKeyHeaders } from './protocol-http';
-import { fetchModelProtocols } from './model-metadata';
+import { fetchModelMetadata } from './model-metadata';
+import type { RemoteModelMetadata } from './model-metadata';
 
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
@@ -27,7 +28,7 @@ function modelIdentifier(raw: Record<string, unknown>): string {
 export function inferProtocol(
   raw: Record<string, unknown>,
   channel?: ChannelConfig,
-  protocolOverrides?: ReadonlyMap<string, ModelProtocol>,
+  remoteMetadata?: ReadonlyMap<string, RemoteModelMetadata>,
 ): ModelProtocol {
   const explicit = [raw.apiType, raw.api_type, raw.protocol, raw.endpoint, raw.api]
     .filter((value): value is string => typeof value === 'string')
@@ -38,7 +39,7 @@ export function inferProtocol(
   if (explicit.includes('openai') || explicit.includes('chat-completions') || explicit.includes('chat/completions')) return 'openai';
   // Gemini 形态的目录用 name 承载模型标识且带 models/ 前缀，外部协议元数据的键则不带前缀。
   const rawId = modelIdentifier(raw);
-  const override = protocolOverrides?.get(rawId);
+  const override = remoteMetadata?.get(rawId)?.protocol;
   if (override) return override;
   const modelId = rawId.toLowerCase();
   if (channel?.preset === 'opencode-go' && (/^minimax-/.test(modelId) || /^qwen3\.[5-9]/.test(modelId))) return 'anthropic';
@@ -49,7 +50,7 @@ export function parseModelCatalog(
   payload: unknown,
   channel: ChannelConfig,
   now = Date.now(),
-  protocolOverrides?: ReadonlyMap<string, ModelProtocol>,
+  remoteMetadata?: ReadonlyMap<string, RemoteModelMetadata>,
 ): CatalogModel[] {
   const root = objectValue(payload);
   const items = Array.isArray(payload) ? payload : Array.isArray(root.data) ? root.data : Array.isArray(root.models) ? root.models : [];
@@ -57,7 +58,7 @@ export function parseModelCatalog(
   return items.flatMap((entry, catalogOrder) => {
     const raw = objectValue(entry);
     const rawId = typeof raw.id === 'string' ? raw.id.trim() : typeof raw.name === 'string' ? raw.name.trim() : '';
-    const protocol = inferProtocol(raw, channel, protocolOverrides);
+    const protocol = inferProtocol(raw, channel, remoteMetadata);
     const id = protocol === 'gemini' ? rawId.replace(/^models\//, '') : rawId;
     if (!id || seen.has(id)) return [];
     seen.add(id);
@@ -94,6 +95,7 @@ export function parseModelCatalog(
       maxInputTokens,
       maxOutputTokens,
       supportsTools,
+      reasoningEfforts: remoteMetadata?.get(modelIdentifier(raw))?.reasoningEfforts,
       lastSeenAt: now,
     }];
   });
@@ -143,8 +145,8 @@ export class CatalogService {
       const apiKey = await this.storage.getApiKey(channel.id);
       const payload = await this.fetchJsonWithRetry(joinEndpoint(channel.baseUrl, channel.modelsPath), apiKey, channel);
       if (!this.hasRecognizedCatalogShape(payload)) throw new Error('模型目录格式不受支持');
-      const protocolOverrides = await fetchModelProtocols(channel, channel.timeoutMs);
-      const discovered = parseModelCatalog(payload, channel, Date.now(), protocolOverrides);
+      const remoteMetadata = await fetchModelMetadata(channel, channel.timeoutMs);
+      const discovered = parseModelCatalog(payload, channel, Date.now(), remoteMetadata);
       let merged: CatalogModel[] = [];
       let change: CatalogChange | undefined;
       await this.storage.updateModels((allModels) => {

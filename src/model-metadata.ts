@@ -1,4 +1,5 @@
-import type { ChannelConfig, ModelProtocol } from './types';
+import { isReasoningEffort } from './reasoning-effort';
+import type { ChannelConfig, ModelProtocol, ReasoningEffort } from './types';
 
 const METADATA_URL = 'https://models.dev/api.json';
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -18,8 +19,13 @@ function objectValue(value: unknown): Record<string, unknown> {
 let cache: { fetchedAt: number; payload: Record<string, unknown> } | undefined;
 let pending: Promise<Record<string, unknown> | undefined> | undefined;
 
+export interface RemoteModelMetadata {
+  protocol: ModelProtocol;
+  reasoningEfforts?: ReasoningEffort[];
+}
+
 /** 缓存是模块级的，测试需要显式清空以保持用例互相独立。 */
-export function resetModelProtocolCache(): void {
+export function resetModelMetadataCache(): void {
   cache = undefined;
   pending = undefined;
 }
@@ -45,10 +51,10 @@ async function loadMetadata(timeoutMs: number): Promise<Record<string, unknown> 
 }
 
 /**
- * 按渠道的 chat 端点匹配 models.dev 中的 provider，返回该 provider 下每个模型的协议。
+ * 按渠道的 chat 端点匹配 models.dev 中的 provider，返回该 provider 下每个模型的协议与推理强度档位。
  * 拉取失败或匹配不到时返回 undefined，调用方回落到本地推断规则。
  */
-export async function fetchModelProtocols(channel: ChannelConfig, timeoutMs: number): Promise<Map<string, ModelProtocol> | undefined> {
+export async function fetchModelMetadata(channel: ChannelConfig, timeoutMs: number): Promise<Map<string, RemoteModelMetadata> | undefined> {
   let chatEndpoint: string;
   try {
     chatEndpoint = new URL(channel.chatPath.replace(/^\/+/, ''), `${channel.baseUrl.replace(/\/+$/, '')}/`).toString();
@@ -62,10 +68,22 @@ export async function fetchModelProtocols(channel: ChannelConfig, timeoutMs: num
     const api = typeof provider.api === 'string' ? provider.api.replace(/\/+$/, '') : '';
     if (!api || !chatEndpoint.startsWith(`${api}/`)) continue;
     const fallback = protocolFromNpm(provider.npm);
-    const result = new Map<string, ModelProtocol>();
+    const result = new Map<string, RemoteModelMetadata>();
     for (const [modelId, rawModel] of Object.entries(objectValue(provider.models))) {
-      const override = objectValue(objectValue(rawModel).provider).npm;
-      result.set(modelId, override === undefined ? fallback : protocolFromNpm(override));
+      const model = objectValue(rawModel);
+      const override = objectValue(model.provider).npm;
+      const efforts = Array.isArray(model.reasoning_options)
+        ? model.reasoning_options.flatMap((option) => {
+          const value = objectValue(option);
+          if (value.type !== 'effort' || !Array.isArray(value.values)) return [];
+          return value.values.filter(isReasoningEffort);
+        })
+        : [];
+      const reasoningEfforts = [...new Set(efforts)];
+      result.set(modelId, {
+        protocol: override === undefined ? fallback : protocolFromNpm(override),
+        ...(reasoningEfforts.length > 0 ? { reasoningEfforts } : {}),
+      });
     }
     return result.size > 0 ? result : undefined;
   }

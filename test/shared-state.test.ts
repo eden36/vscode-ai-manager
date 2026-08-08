@@ -85,6 +85,7 @@ describe('共享状态合并', () => {
       models: {
         [valid]: { revision: 1, deviceId: 'device-a', value: model() },
         broken: { revision: 2, deviceId: 'device-a', value: { channelId: 'channel-1', id: 'model-2' } },
+        'broken-effort': { revision: 3, deviceId: 'device-a', value: model({ id: 'model-3', reasoningEfforts: ['turbo'] as any }) },
       },
       bindings: {},
       chatSettings: {},

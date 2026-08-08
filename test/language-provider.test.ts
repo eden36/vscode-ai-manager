@@ -83,6 +83,22 @@ function respond(provider: AiManagerLanguageProvider): Promise<void> {
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
+describe('模型配置', () => {
+  it('仅为声明 effort 档位的模型提供原生下拉配置', () => {
+    const { provider } = createProvider({ reasoningEfforts: ['max'] });
+    const information = provider.provideLanguageModelChatInformation({ silent: true } as any, token as any) as any[];
+    expect(information[0]?.configurationSchema.properties.reasoningEffort).toMatchObject({
+      title: '推理强度',
+      enum: ['default', 'max'],
+      enumItemLabels: ['default', 'max'],
+      default: 'default',
+    });
+
+    const withoutEffort = createProvider().provider.provideLanguageModelChatInformation({ silent: true } as any, token as any) as any[];
+    expect(withoutEffort[0]?.configurationSchema).toBeUndefined();
+  });
+});
+
 describe('协议自动回退', () => {
   it('404 遍历其余已配置协议并把结果写回目录', async () => {
     const fetchMock = routedFetch({

@@ -5,6 +5,7 @@ import type { StreamResult } from './openai-client';
 import { openAiToolParameters } from './openai-client';
 import { apiKeyHeaders, createRequestControl, parseSseEvent, protocolUrl } from './protocol-http';
 import type { ResolvedCandidate } from './types';
+import { resolveReasoningEffort } from './reasoning-effort';
 
 const SIGNATURE_MIME = 'application/vnd.ai-manager.gemini-tool-signature+json';
 
@@ -63,10 +64,14 @@ export class GeminiClient {
       description: tool.description ?? tool.name,
       parametersJsonSchema: openAiToolParameters(tool.inputSchema),
     }));
+    const reasoningEffort = resolveReasoningEffort(target.model, options);
     const body = {
       contents: converted.contents,
       ...(converted.systemInstruction ? { systemInstruction: converted.systemInstruction } : {}),
-      generationConfig: { maxOutputTokens: target.model.maxOutputTokens },
+      generationConfig: {
+        maxOutputTokens: target.model.maxOutputTokens,
+        ...(reasoningEffort ? { thinkingConfig: { thinkingLevel: reasoningEffort } } : {}),
+      },
       ...(declarations?.length ? {
         tools: [{ functionDeclarations: declarations }],
         toolConfig: { functionCallingConfig: { mode: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'ANY' : 'AUTO' } },

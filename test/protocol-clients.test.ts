@@ -67,7 +67,7 @@ describe('AnthropicClient', () => {
   });
 
   it('转换消息并解析文本和流式工具调用', async () => {
-    const target = { channel: channel({ preset: 'opencode-go', anthropicPath: '/zen/go/v1/messages' }), model: model({ protocol: 'anthropic' }) };
+    const target = { channel: channel({ preset: 'opencode-go', anthropicPath: '/zen/go/v1/messages' }), model: model({ protocol: 'anthropic', reasoningEfforts: ['high'] }) };
     const fetchMock = vi.fn().mockResolvedValue(eventResponse([
       { event: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '你好' } } },
       { event: 'content_block_start', data: { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'call-1', name: 'read_file' } } },
@@ -75,12 +75,13 @@ describe('AnthropicClient', () => {
     ]));
     vi.stubGlobal('fetch', fetchMock);
     const parts: unknown[] = [];
-    await new AnthropicClient().streamChat(target, 'secret', [{ role: 1, name: undefined, content: [new vscode.LanguageModelTextPart('hi')] } as any], { tools: [{ name: 'read_file', description: '读取', inputSchema: {} }] } as any, { report: (part) => parts.push(part) }, token as any);
+    await new AnthropicClient().streamChat(target, 'secret', [{ role: 1, name: undefined, content: [new vscode.LanguageModelTextPart('hi')] } as any], { tools: [{ name: 'read_file', description: '读取', inputSchema: {} }], modelConfiguration: { reasoningEffort: 'high' } } as any, { report: (part) => parts.push(part) }, token as any);
     expect(parts).toEqual([expect.objectContaining({ value: '你好' }), expect.objectContaining({ callId: 'call-1', name: 'read_file', input: { path: 'README.md' } })]);
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe('https://example.com/zen/go/v1/messages');
     expect((init.headers as Record<string, string>)).toMatchObject({ 'x-api-key': 'secret', 'anthropic-version': '2023-06-01' });
     expect((init.headers as Record<string, string>).Authorization).toBeUndefined();
+    expect(JSON.parse(init.body as string).output_config).toEqual({ effort: 'high' });
   });
 
   it('将工具调用和结果转换为 Messages 内容块', () => {
@@ -108,7 +109,7 @@ describe('AnthropicClient', () => {
 
 describe('ResponsesClient', () => {
   it('调用 Responses 端点并解析文本与流式工具调用', async () => {
-    const target = { channel: channel({ preset: 'opencode-go', responsesPath: '/zen/go/v1/responses' }), model: model({ id: 'grok-4.5', protocol: 'responses' }) };
+    const target = { channel: channel({ preset: 'opencode-go', responsesPath: '/zen/go/v1/responses' }), model: model({ id: 'grok-4.5', protocol: 'responses', reasoningEfforts: ['low', 'high'] }) };
     const fetchMock = vi.fn().mockResolvedValue(eventResponse([
       { event: 'response.output_text.delta', data: { type: 'response.output_text.delta', delta: '你好' } },
       { event: 'response.output_item.added', data: { type: 'response.output_item.added', output_index: 1, item: { type: 'function_call', id: 'item-1', call_id: 'call-1', name: 'read_file' } } },
@@ -116,7 +117,7 @@ describe('ResponsesClient', () => {
     ]));
     vi.stubGlobal('fetch', fetchMock);
     const parts: unknown[] = [];
-    await new ResponsesClient().streamChat(target, 'secret', [{ role: 1, name: undefined, content: [new vscode.LanguageModelTextPart('hi')] } as any], { tools: [{ name: 'read_file', description: '读取', inputSchema: {} }] } as any, { report: (part) => parts.push(part) }, token as any);
+    await new ResponsesClient().streamChat(target, 'secret', [{ role: 1, name: undefined, content: [new vscode.LanguageModelTextPart('hi')] } as any], { tools: [{ name: 'read_file', description: '读取', inputSchema: {} }], modelOptions: { reasoningEffort: 'low' } } as any, { report: (part) => parts.push(part) }, token as any);
     expect(parts).toEqual([
       expect.objectContaining({ value: '你好' }),
       expect.objectContaining({ callId: 'call-1', name: 'read_file', input: { path: 'README.md' } }),
@@ -126,6 +127,7 @@ describe('ResponsesClient', () => {
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer secret');
     const body = JSON.parse(init.body as string);
     expect(body).toMatchObject({ model: 'grok-4.5', stream: true, max_output_tokens: 8_192 });
+    expect(body.reasoning).toEqual({ effort: 'low' });
     expect(body.tools).toEqual([{ type: 'function', name: 'read_file', description: '读取', parameters: { type: 'object', properties: {} } }]);
   });
 
@@ -156,14 +158,14 @@ describe('GeminiClient', () => {
   });
 
   it('解析文本、工具调用并输出可往返的思考签名', async () => {
-    const target = { channel: channel({ authMode: 'google-api-key' }), model: model({ id: 'gemini-test', protocol: 'gemini' }) };
+    const target = { channel: channel({ authMode: 'google-api-key' }), model: model({ id: 'gemini-test', protocol: 'gemini', reasoningEfforts: ['minimal'] }) };
     const fetchMock = vi.fn().mockResolvedValue(eventResponse([{ data: { candidates: [{ content: { parts: [
       { text: '完成' },
       { functionCall: { name: 'read_file', args: { path: 'README.md' } }, thoughtSignature: 'signature-1' },
     ] } }] } }]));
     vi.stubGlobal('fetch', fetchMock);
     const parts: any[] = [];
-    await new GeminiClient().streamChat(target, 'secret', [{ role: 1, name: undefined, content: [new vscode.LanguageModelTextPart('hi')] } as any], {} as any, { report: (part) => parts.push(part) }, token as any);
+    await new GeminiClient().streamChat(target, 'secret', [{ role: 1, name: undefined, content: [new vscode.LanguageModelTextPart('hi')] } as any], { modelConfiguration: { reasoningEffort: 'minimal' } } as any, { report: (part) => parts.push(part) }, token as any);
     expect(parts[0]).toMatchObject({ value: '完成' });
     expect(parts[1]).toMatchObject({ name: 'read_file', input: { path: 'README.md' } });
     const converted = convertGeminiMessages([{ role: 2, content: [parts[1], parts[2]] } as any]);
@@ -171,6 +173,7 @@ describe('GeminiClient', () => {
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe('https://example.com/v1beta/models/gemini-test:streamGenerateContent?alt=sse');
     expect((init.headers as Record<string, string>)['x-goog-api-key']).toBe('secret');
+    expect(JSON.parse(init.body as string).generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'minimal' });
   });
 
   it('将工具结果关联回函数名', () => {

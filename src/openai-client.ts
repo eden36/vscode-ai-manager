@@ -4,6 +4,7 @@ import { joinEndpoint } from './catalog';
 import type { ResolvedCandidate } from './types';
 import { extractMessageText, normalizeMessageRole } from './message-roles';
 import { apiKeyHeaders, createRequestControl } from './protocol-http';
+import { resolveReasoningEffort } from './reasoning-effort';
 
 interface OpenAIMessage {
   role: 'user' | 'assistant' | 'system' | 'tool';
@@ -103,11 +104,13 @@ export class OpenAIClient {
           parameters: openAiToolParameters(tool.inputSchema),
         },
       }));
+      const reasoningEffort = resolveReasoningEffort(target.model, options);
       const body = {
         model: target.model.id,
         messages: converted,
         stream: true,
         max_tokens: target.model.maxOutputTokens,
+        ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
         ...(tools && tools.length > 0 ? {
           tools,
           tool_choice: options.toolMode === vscode.LanguageModelChatToolMode.Required ? 'required' : 'auto',

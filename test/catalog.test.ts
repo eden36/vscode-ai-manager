@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CatalogService, catalogMetadataBaseline, inferProtocol, joinEndpoint, parseModelCatalog } from '../src/catalog';
 import { createModelProviderId } from '../src/models';
 import { createChannelDefaults } from '../src/presets';
-import type { ChannelPreset, ModelProtocol } from '../src/types';
+import type { ChannelPreset } from '../src/types';
+import type { RemoteModelMetadata } from '../src/model-metadata';
+import { resetModelMetadataCache } from '../src/model-metadata';
 import { channel, model } from './fixtures';
 
 describe('parseModelCatalog', () => {
@@ -37,19 +39,19 @@ describe('parseModelCatalog', () => {
 
   it('外部协议元数据优先于模型 ID 推断，缺失时回落本地规则', () => {
     const go = channel({ preset: 'opencode-go' });
-    const overrides = new Map<string, ModelProtocol>([['grok-4.5', 'responses'], ['minimax-m3', 'anthropic']]);
+    const overrides = new Map<string, RemoteModelMetadata>([['grok-4.5', { protocol: 'responses' }], ['minimax-m3', { protocol: 'anthropic' }]]);
     expect(parseModelCatalog({ data: [{ id: 'grok-4.5' }, { id: 'minimax-m3' }, { id: 'qwen3.7-plus' }] }, go, Date.now(), overrides).map((item) => item.protocol))
       .toEqual(['responses', 'anthropic', 'anthropic']);
   });
 
   it('显式协议字段优先于外部协议元数据', () => {
-    expect(inferProtocol({ id: 'grok-4.5', endpoint: '/v1/messages' }, undefined, new Map([['grok-4.5', 'responses']]))).toBe('anthropic');
+    expect(inferProtocol({ id: 'grok-4.5', endpoint: '/v1/messages' }, undefined, new Map([['grok-4.5', { protocol: 'responses' }]]))).toBe('anthropic');
   });
 
   it('外部协议元数据可匹配 name 键与 models/ 前缀的目录条目', () => {
-    const overrides = new Map<string, ModelProtocol>([['gemini-3-flash', 'gemini']]);
+    const overrides = new Map<string, RemoteModelMetadata>([['gemini-3-flash', { protocol: 'gemini', reasoningEfforts: ['low', 'high'] }]]);
     expect(parseModelCatalog({ models: [{ name: 'models/gemini-3-flash' }] }, channel(), Date.now(), overrides)[0])
-      .toMatchObject({ id: 'gemini-3-flash', protocol: 'gemini' });
+      .toMatchObject({ id: 'gemini-3-flash', protocol: 'gemini', reasoningEfforts: ['low', 'high'] });
   });
 
   it('显式协议优先于模型 ID 推断', () => {
@@ -112,7 +114,7 @@ describe('joinEndpoint', () => {
 });
 
 describe('CatalogService 目录合并', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => { vi.unstubAllGlobals(); resetModelMetadataCache(); });
 
   it('保留模型配置并报告移除、新增和重新出现', async () => {
     let models = [
@@ -201,6 +203,32 @@ describe('CatalogService 目录合并', () => {
         supportsTools: true,
       },
     });
+  });
+
+  it('刷新时同步更新并移除过期的推理强度档位', async () => {
+    let models = [model({ id: 'kimi-k3', reasoningEfforts: ['low'] })];
+    let channels = [channel(createChannelDefaults('opencode-go'))];
+    let reasoningOptions: unknown[] = [{ type: 'effort', values: ['max'] }];
+    const storage = {
+      getChannels: () => channels,
+      getModels: () => models,
+      getApiKey: async () => undefined,
+      updateModels: async (update: (value: typeof models) => typeof models) => { models = update(models); return models; },
+      updateChannels: async (update: (value: typeof channels) => typeof channels) => { channels = update(channels); return channels; },
+    };
+    vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve(new Response(JSON.stringify(url === 'https://models.dev/api.json'
+      ? { 'opencode-go': { api: 'https://opencode.ai/zen/go/v1', npm: '@ai-sdk/openai-compatible', models: { 'kimi-k3': { reasoning_options: reasoningOptions } } } }
+      : { data: [{ id: 'kimi-k3' }] }), { status: 200 }))));
+
+    await new CatalogService(storage as any).refreshChannel('channel-1');
+    expect(models[0]?.reasoningEfforts).toEqual(['max']);
+    expect(models[0]?.catalogMetadata?.reasoningEfforts).toEqual(['max']);
+
+    reasoningOptions = [];
+    resetModelMetadataCache();
+    await new CatalogService(storage as any).refreshChannel('channel-1');
+    expect(models[0]?.reasoningEfforts).toBeUndefined();
+    expect(models[0]?.catalogMetadata?.reasoningEfforts).toBeUndefined();
   });
 
   it('汇总全渠道刷新失败而不是静默丢弃', async () => {

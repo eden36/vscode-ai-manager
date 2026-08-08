@@ -6,14 +6,16 @@ export function catalogMetadataBaseline(model: CatalogModel): CatalogModelMetada
     maxInputTokens: model.maxInputTokens,
     maxOutputTokens: model.maxOutputTokens,
     supportsTools: model.supportsTools,
+    reasoningEfforts: model.reasoningEfforts,
   };
 }
 
-export function catalogMetadataFrom(model: Pick<CatalogModel, 'protocol' | 'maxInputTokens' | 'maxOutputTokens' | 'supportsTools'>): CatalogModelMetadata {
+export function catalogMetadataFrom(model: Pick<CatalogModel, 'protocol' | 'maxInputTokens' | 'maxOutputTokens' | 'supportsTools' | 'reasoningEfforts'>): CatalogModelMetadata {
   return {
     protocol: model.protocol,
     maxInputTokens: model.maxInputTokens,
     maxOutputTokens: model.maxOutputTokens,
     supportsTools: model.supportsTools,
+    reasoningEfforts: model.reasoningEfforts,
   };
 }
