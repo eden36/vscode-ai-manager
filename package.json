@@ -27,6 +27,15 @@
     "Model Router"
   ],
   "main": "./dist/extension.js",
+  "files": [
+    "dist/**",
+    "media/**",
+    "docs/**",
+    "LICENSE",
+    "README.md",
+    "README.zh-CN.md",
+    "README.ja.md"
+  ],
   "activationEvents": [
     "onStartupFinished"
   ],
